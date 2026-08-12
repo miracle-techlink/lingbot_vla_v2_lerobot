@@ -142,6 +142,8 @@ class Qwen2FusedExperts(nn.Module):
         self.down_proj = nn.Parameter(torch.empty(num_experts, hidden_size, intermediate_size))
         self.register_buffer("_gate_up_proj_cache", None, persistent=False)
         self._gate_up_proj_cache_key = None
+        self.register_buffer("_dense_w1_cache", None, persistent=False)
+        self.register_buffer("_dense_w2_cache", None, persistent=False)
         self._robby_moe_workspace = None
         self._robby_moe_workspace_key = None
         self.reset_parameters()
@@ -155,6 +157,8 @@ class Qwen2FusedExperts(nn.Module):
     def clear_inference_cache(self):
         self._gate_up_proj_cache = None
         self._gate_up_proj_cache_key = None
+        self._dense_w1_cache = None
+        self._dense_w2_cache = None
         self._robby_moe_workspace = None
         self._robby_moe_workspace_key = None
 
@@ -193,6 +197,67 @@ class Qwen2FusedExperts(nn.Module):
             self._robby_moe_workspace_key = key
         return self._robby_moe_workspace
 
+    def _dense_packed_weights(self):
+        """E-major repacked weights for the two-GEMM dense path.
+
+        w1: [H, E*2I] — gate and up concatenated along the output dim, so a single
+            ``x @ w1`` computes every expert's gate and up projections at once.
+        w2: [E*I, H] — down projections concatenated along the input dim, so the
+            second GEMM's reduction over E*I performs the (weight-folded) expert
+            combine for free.
+
+        Cached only when gradients are disabled (inference); under autograd the
+        repack is rebuilt each call so gradients flow into the Parameters.
+        """
+        E, I, H = self.gate_proj.shape
+        if torch.is_grad_enabled():
+            w1 = torch.cat([self.gate_proj, self.up_proj], dim=1).reshape(E * 2 * I, H).t()
+            w2 = self.down_proj.permute(0, 2, 1).reshape(E * I, H)
+            return w1, w2
+        if self._dense_w1_cache is None:
+            with torch.no_grad():
+                self._dense_w1_cache = (
+                    torch.cat([self.gate_proj, self.up_proj], dim=1)
+                    .reshape(E * 2 * I, H)
+                    .t()
+                    .contiguous()
+                )
+                self._dense_w2_cache = (
+                    self.down_proj.permute(0, 2, 1).reshape(E * I, H).contiguous()
+                )
+        return self._dense_w1_cache, self._dense_w2_cache
+
+    def _dense_forward(self, routing_weights, selected_experts, hidden_states):
+        """Dense two-GEMM MoE: compute ALL experts for ALL tokens, fold the top-k
+        routing weights into the intermediate, and let the down GEMM's reduction
+        perform the weighted expert combine.
+
+        Algebraically identical to the grouped/eager paths (unselected experts get
+        an exact 0 weight), differing only in floating-point reassociation. At the
+        tiny token counts of flow-matching inference (T ~= chunk+1 = 51) the 8x
+        extra FLOPs of computing every expert cost less than the routing machinery
+        (argsort / gather / scatter / per-expert launches) they replace — and being
+        two plain matmuls with static shapes, the whole block stays inside a single
+        torch.compile graph instead of forcing a graph break per MoE layer.
+
+        Routing weights are combined in fp32, matching the eager path's fp32
+        accumulation; cast back to the input dtype at the end.
+        """
+        T, H = hidden_states.shape
+        E, I = self.gate_proj.shape[0], self.gate_proj.shape[1]
+        w1, w2 = self._dense_packed_weights()  # [H, E*2I], [E*I, H]
+
+        gu = (hidden_states @ w1).view(T, E, 2 * I)
+        inter = F.silu(gu[..., :I]) * gu[..., I:]  # [T, E, I]
+
+        # One-hot the top-k routing weights back to a dense [T, E] table (0 for
+        # unselected experts) and fold them into the intermediate activations.
+        w = torch.zeros(T, E, dtype=torch.float32, device=hidden_states.device)
+        w.scatter_(1, selected_experts, routing_weights.to(torch.float32))
+        inter = inter * w.unsqueeze(-1).to(inter.dtype)
+
+        return (inter.reshape(T, E * I) @ w2).to(hidden_states.dtype)
+
     def forward(self, module, num_experts, routing_weights, selected_experts, hidden_states):
         """Run the fused experts with FSDP2-managed weights.
 
@@ -202,7 +267,13 @@ class Qwen2FusedExperts(nn.Module):
         grouped-by-expert eager fallback (:meth:`_eager_forward`). All three are numerically
         equivalent up to floating-point / tensor-core reassociation.
         """
-        # 1) vendor triton kernel, if the external package is installed.
+        # 1) dense two-GEMM path for small token counts (flow-matching denoise:
+        # T ~= 51). Pure torch, static shapes, no graph breaks under torch.compile.
+        dense_max_tokens = getattr(module, "_dense_max_tokens", 512)
+        if 0 < dense_max_tokens and hidden_states.shape[0] <= dense_max_tokens:
+            return self._dense_forward(routing_weights, selected_experts, hidden_states)
+
+        # 2) vendor triton kernel, if the external package is installed.
         try:
             from lingbotvla.ops.fused_moe import fused_moe_forward
 
@@ -219,7 +290,7 @@ class Qwen2FusedExperts(nn.Module):
         except ImportError:
             pass
 
-        # 2) in-tree triton grouped-GEMM (no extra dependency); guarded, CUDA + inference only.
+        # 3) in-tree triton grouped-GEMM (no extra dependency); guarded, CUDA + inference only.
         if hidden_states.is_cuda and not torch.is_grad_enabled():
             from .triton_moe import triton_grouped_moe, triton_moe_available
 
@@ -229,7 +300,7 @@ class Qwen2FusedExperts(nn.Module):
                 except Exception as exc:  # noqa: BLE001 - any kernel failure -> safe fallback
                     logger.warning_once(f"triton grouped-MoE failed ({exc}); using eager fallback")
 
-        # 3) pure-torch grouped-by-expert eager fallback (CPU / no triton / training).
+        # 4) pure-torch grouped-by-expert eager fallback (CPU / no triton / training).
         return self._eager_forward(routing_weights, selected_experts, hidden_states)
 
     def _eager_forward(self, routing_weights, selected_experts, hidden_states):
@@ -331,6 +402,9 @@ class Qwen2TokenMoeBlock(nn.Module):
 
         # gating (per-token)
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
+        # Token-count ceiling for the dense two-GEMM MoE path (0 disables it and
+        # falls through to the triton / grouped-eager backends).
+        self._dense_max_tokens = getattr(config, "moe_dense_max_tokens", 512)
 
         # EP/fused support: choose expert storage based on moe_implementation
         self._moe_implementation = getattr(config, "_moe_implementation", None) or "eager"
@@ -387,10 +461,12 @@ class Qwen2TokenMoeBlock(nn.Module):
             routing_weights = routing_weights * self.routed_scaling_factor
         routing_weights = routing_weights.to(hidden_states.dtype)
 
-        # Expert computation: fused (group_gemm) or eager (per-expert loop)
+        # Expert computation: dense two-GEMM (small T) / vendor triton / grouped eager
         if self._moe_implementation == "fused":
+            use_dense = 0 < self._dense_max_tokens and hidden_flat.shape[0] <= self._dense_max_tokens
             use_robby_moe = (
-                robby_moe_forward is not None
+                not use_dense
+                and robby_moe_forward is not None
                 and hidden_flat.is_cuda
                 and not self.training
                 and not torch.is_grad_enabled()

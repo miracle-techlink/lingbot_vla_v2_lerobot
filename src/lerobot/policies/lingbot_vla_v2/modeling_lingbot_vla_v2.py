@@ -215,6 +215,7 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
             )
             token_config.bias_update_speed = bias_update_speed
             token_config._moe_implementation = _moe_impl
+            token_config.moe_dense_max_tokens = getattr(self.config, "moe_dense_max_tokens", 512)
             token_config.router_activation = getattr(self.config, "router_activation", "softmax")
             token_config.routed_scaling_factor = getattr(self.config, "routed_scaling_factor", 1.0)
             token_config.use_shared_expert_gate = getattr(self.config, "use_shared_expert_gate", True)
@@ -640,6 +641,7 @@ class FlowMatchingV2(FlowMatchingV1):
             "routed_scaling_factor",
             "use_shared_expert_gate",
             "_moe_implementation",
+            "moe_dense_max_tokens",
         ]:
             if hasattr(config, name):
                 setattr(qwenvl_with_export_config, name, getattr(config, name))

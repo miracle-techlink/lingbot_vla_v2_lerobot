@@ -227,6 +227,13 @@ class LingbotVLAV2Config(PreTrainedConfig):
     # The released upstream checkpoint stores experts in the stacked/fused layout.
     # Set to None only for fresh experiments that intentionally use a ModuleList MoE.
     moe_implementation: str | None = "fused"
+    # Token-count ceiling for the dense two-GEMM pure-torch MoE path (fused layout
+    # only): when B*T <= this, every expert is computed with two plain matmuls and
+    # the routing weights are folded into the down GEMM — no argsort/gather/scatter,
+    # static shapes, no torch.compile graph breaks. At the flow-matching denoise
+    # token count (51) this is much faster than routed dispatch; the 8x FLOP waste
+    # is free at that scale. 0 disables (falls back to triton/grouped-eager).
+    moe_dense_max_tokens: int = 512
 
     # ==================== Optional predictive-dynamics distillation branch ====================
     # Only used by the native-depth (6B) checkpoint. Empty ``align_params`` disables it,
