@@ -375,6 +375,22 @@ def make_lingbot_vla_v2_pre_post_processors_from_pretrained(
     if "device_processor" not in postprocessor_overrides and "device_processor" in preprocessor_overrides:
         postprocessor_overrides["device_processor"] = preprocessor_overrides["device_processor"]
 
+    # The saved feature-transform step carries the slot mapping / normalization stats of
+    # the checkpoint's *source* embodiment. When fine-tuning on a new embodiment the
+    # policy config's assets must win here too — explicit ``robot_config_path`` /
+    # ``norm_stats_path`` first, the config's embedded contents as fallback (same rule
+    # as ``resolve_robot_config_and_stats``) — otherwise the training preprocessor
+    # silently keeps the source embodiment's mapping while the policy itself was
+    # already re-resolved onto the new one.
+    resolve_robot_config_and_stats(config)
+    feature_step_overrides: dict[str, Any] = {}
+    if config.robot_config is not None:
+        feature_step_overrides["robot_config"] = config.robot_config
+    if config.norm_stats is not None:
+        feature_step_overrides["norm_stats"] = config.norm_stats
+    if feature_step_overrides:
+        preprocessor_overrides["lingbot_vla_v2_feature_transform"] = feature_step_overrides
+
     preprocessor = PolicyProcessorPipeline.from_pretrained(
         pretrained_model_name_or_path=pretrained_path,
         config_filename=preprocessor_config_filename,
