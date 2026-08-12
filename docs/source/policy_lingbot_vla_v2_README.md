@@ -74,6 +74,54 @@ The robot config maps dataset keys into the canonical LingBot slots. The norm-st
 used by the LingBot feature transform, so the saved LeRobot processor pipeline does not use
 the generic LeRobot normalizer/unnormalizer steps.
 
+## Adapting to a New Embodiment
+
+Fine-tuning on a robot the checkpoint was not converted for only requires two new assets —
+a robot-config YAML and a norm-stats JSON — passed as `--policy.robot_config_path` /
+`--policy.norm_stats_path`. Explicit paths take precedence over the assets embedded in the
+checkpoint (a warning is logged when they differ), and checkpoints saved during fine-tuning
+embed the new assets so they remain self-contained.
+
+Single-arm example (7-DoF: 6 arm joints + gripper, absolute joint angles, `front` + `wrist`
+cameras) — the filled dims are packed from position 0 of each canonical slot, unfilled slots
+are zero-padded and masked out of the loss:
+
+```yaml
+# rebot.yaml
+states:
+  - observation.state.arm.position:
+      origin_keys:
+        - observation.state: { start: 0, end: 6 }
+  - observation.state.effector.position:
+      origin_keys:
+        - observation.state: { start: 6, end: 7 }
+actions:
+  - action.arm.position:
+      origin_keys:
+        - action: { start: 0, end: 6 }
+      subtract_state: false # absolute actions; true only for state-relative deltas
+  - action.effector.position:
+      origin_keys:
+        - action: { start: 6, end: 7 }
+      subtract_state: false
+images: # unmapped canonical views (camera_wrist_right) are zero-filled
+  - observation.images.camera_top:
+      origin_keys: observation.images.front
+  - observation.images.camera_wrist_left:
+      origin_keys: observation.images.wrist
+norm_stats: rebot_norm_stats.json
+```
+
+The norm-stats JSON holds per-slot `mean`/`std` over the filled dims (the default
+`canonical_norm_type` is `meanstd`), e.g. `{"norm_stats": {"action.arm.position": {"mean":
+[...6], "std": [...6]}, ...}}` — derivable from a LeRobot dataset's `meta/stats.json`.
+
+Deploy the fine-tuned checkpoint on the robot with `lerobot-rollout`
+(`--strategy.type=episodic` to record evaluation episodes); camera names must match the
+`origin_keys` above. `select_action` returns actions in the robot's raw action space.
+
+See `docs/source/lingbot_vla_v2.mdx` for the full walkthrough.
+
 ## Resume
 
 Resume from a saved LeRobot checkpoint by passing the checkpoint's `train_config.json`:

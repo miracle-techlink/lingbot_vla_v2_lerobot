@@ -175,6 +175,119 @@ canonical joints, `images` rename cameras). Missing source keys are warned once 
 slot, but the robot config must still match the checkpoint's canonical layout to avoid wrong
 padding or normalization.
 
+When fine-tuning a converted checkpoint on a **new** embodiment, the explicit
+`--policy.robot_config_path` / `--policy.norm_stats_path` take precedence over the assets
+embedded in the checkpoint (a warning is logged when they differ). Checkpoints saved during
+fine-tuning embed the new assets, so they stay self-contained and portable.
+
+## Example: adapting to a single-arm robot
+
+This example adapts the released checkpoint to a 7-DoF single arm (6 arm joints + 1 gripper,
+joint angles in degrees, absolute action space) with two cameras (`front` + `wrist`), e.g. a
+Seeed reBot B601-RS dataset recorded with LeRobot.
+
+**1. Write the robot config (`rebot.yaml`).** The canonical layout packs filled dims from
+position 0 of each slot; unfilled slots are zero-padded and excluded from the loss via
+`joint_mask`. `subtract_state: false` keeps actions absolute (set it to `true` only when the
+dataset stores actions as deltas relative to the state, and never for `effector.position`):
+
+```yaml
+states:
+  - observation.state.arm.position:
+      origin_keys:
+        - observation.state: # state[0:6] -> arm.position[0:6] (14-D slot, rest padded)
+            start: 0
+            end: 6
+  - observation.state.effector.position:
+      origin_keys:
+        - observation.state: # state[6] -> effector.position[0] (2-D slot)
+            start: 6
+            end: 7
+
+actions:
+  - action.arm.position:
+      origin_keys:
+        - action:
+            start: 0
+            end: 6
+      subtract_state: false
+  - action.effector.position:
+      origin_keys:
+        - action:
+            start: 6
+            end: 7
+      subtract_state: false
+
+images: # map dataset cameras onto the canonical views; unmapped views are zero-filled
+  - observation.images.camera_top:
+      origin_keys: observation.images.front
+  - observation.images.camera_wrist_left:
+      origin_keys: observation.images.wrist
+
+norm_stats: rebot_norm_stats.json
+```
+
+**2. Generate the per-slot normalization stats.** With `canonical_norm_type` at its default
+(`meanstd`), the stats JSON needs `mean`/`std` per filled slot dim, computed over the dataset.
+For a LeRobot v3 dataset you can derive them from `meta/stats.json`:
+
+```python
+import json
+
+stats = json.load(open("<dataset_root>/meta/stats.json"))
+out = {"norm_stats": {}}
+for raw in ("observation.state", "action"):
+    out["norm_stats"][f"{raw}.arm.position"] = {
+        "mean": stats[raw]["mean"][0:6],
+        "std": [max(v, 1e-3) for v in stats[raw]["std"][0:6]],
+    }
+    out["norm_stats"][f"{raw}.effector.position"] = {
+        "mean": stats[raw]["mean"][6:7],
+        "std": [max(v, 1e-3) for v in stats[raw]["std"][6:7]],
+    }
+json.dump(out, open("rebot_norm_stats.json", "w"), indent=2)
+```
+
+**3. Fine-tune** with the standard training command, pointing at the new assets:
+
+```bash
+lerobot-train \
+  --dataset.repo_id=<your/rebot_dataset> \
+  --dataset.root=<dataset_root> \
+  --policy.path=<converted-lingbot-vla-v2-6b> \
+  --policy.robot_config_path=./rebot.yaml \
+  --policy.norm_stats_path=./rebot_norm_stats.json \
+  --policy.dtype=bfloat16 \
+  --policy.loss_type=L1_fm \
+  --policy.optimizer_lr=5e-5 \
+  --policy.scheduler_decay_lr=5e-5 \
+  --batch_size=4 \
+  --steps=5000 \
+  --save_freq=1000
+```
+
+**4. Deploy** on the robot with `lerobot-rollout` (`--strategy.type=episodic` records
+evaluation episodes; camera names must match the `origin_keys` in your robot config).
+`select_action` returns actions in the robot's raw action space (here: 7 absolute joint
+angles in degrees) after the policy postprocessing path inverts normalization and the slot
+mapping:
+
+```bash
+lerobot-rollout \
+  --strategy.type=episodic \
+  --policy.path=<output_dir>/checkpoints/last/pretrained_model \
+  --policy.n_action_steps=25 \
+  --device=cuda \
+  --robot.type=<your_robot_type> \
+  --robot.port=<port> \
+  --robot.cameras="{ wrist: {...}, front: {...} }" \
+  --task="pick up the cube" \
+  --fps=30 \
+  --dataset.repo_id=<eval_repo_id> \
+  --dataset.num_episodes=10 \
+  --dataset.push_to_hub=false
+```
+
 ## Numerical validation
 
 The port was validated layer-by-layer against the original `Robbyant/lingbot-vla-v2`
