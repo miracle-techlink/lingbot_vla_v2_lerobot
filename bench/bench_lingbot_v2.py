@@ -244,6 +244,7 @@ def bench_infer(args):
     policy.config.num_steps = args.num_steps
     if getattr(args, "compile", False):
         policy.model._use_compile_predict_velocity = True
+        policy.model._compile_predict_velocity_mode = args.compile_mode
         # handle_kv_cache specializes on layer_idx (36 layers); the default
         # recompile limit (8) can fall back to eager mid-graph
         import torch._dynamo as _dynamo
@@ -415,6 +416,9 @@ def main():
                    help="override moe_dense_max_tokens on all MoE blocks (0 = disable dense path)")
     p.add_argument("--compile", action="store_true",
                    help="torch.compile predict_velocity (inductor, cudagraphs off)")
+    p.add_argument("--compile-mode", default="default",
+                   choices=["default", "max-autotune-no-cudagraphs"],
+                   help="inductor mode for --compile")
     p.add_argument("--num-steps", type=int, default=10)
     p.add_argument("--iters", type=int, default=20)
     p.add_argument("--warmup", type=int, default=3)
