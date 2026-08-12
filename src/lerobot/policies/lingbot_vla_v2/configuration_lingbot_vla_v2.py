@@ -264,6 +264,10 @@ class LingbotVLAV2Config(PreTrainedConfig):
     # 36 dual-stream layers), so this gives a large latency win on GPU. First call
     # compiles (minutes); shapes must stay fixed across calls.
     compile_predict_velocity: bool = False
+    # Inductor mode for compile_predict_velocity: "default" (fast compile) or
+    # "max-autotune-no-cudagraphs" (slow first compile, GEMM autotuning; CUDA
+    # graphs stay disabled either way).
+    compile_predict_velocity_mode: str = "default"
     # Compute/log the MoE monitoring metrics (per-layer MaxVio/entropy/dead-expert,
     # plus the per-metric .item() syncs) once every N training steps. 1 = every
     # step (original behavior).

@@ -1175,12 +1175,23 @@ class FlowMatchingV2(FlowMatchingV1):
         if getattr(self, "_use_compile_predict_velocity", False):
             predict_velocity_fn = getattr(self, "_compiled_predict_velocity", None)
             if predict_velocity_fn is None:
-                predict_velocity_fn = torch.compile(
-                    self.predict_velocity,
-                    fullgraph=False,
-                    dynamic=False,
-                    options={"triton.cudagraphs": False},
-                )
+                mode = getattr(self, "_compile_predict_velocity_mode", "default")
+                if mode == "default":
+                    predict_velocity_fn = torch.compile(
+                        self.predict_velocity,
+                        fullgraph=False,
+                        dynamic=False,
+                        options={"triton.cudagraphs": False},
+                    )
+                else:
+                    # torch.compile forbids mode+options together; the
+                    # *-no-cudagraphs modes already keep CUDA graphs off.
+                    predict_velocity_fn = torch.compile(
+                        self.predict_velocity,
+                        fullgraph=False,
+                        dynamic=False,
+                        mode=mode,
+                    )
                 self._compiled_predict_velocity = predict_velocity_fn
 
         # Loop-invariant tensors (suffix 2D masks / position ids / mrope cos-sin /
@@ -1489,6 +1500,9 @@ class LingbotVLAV2Policy(PreTrainedPolicy):
         # Opt-in torch.compile for the denoise inner loop (see config docs).
         if getattr(self.config, "compile_predict_velocity", False):
             self.model._use_compile_predict_velocity = True
+            self.model._compile_predict_velocity_mode = getattr(
+                self.config, "compile_predict_velocity_mode", "default"
+            )
 
         self.reset()
         torch.set_float32_matmul_precision("high")
