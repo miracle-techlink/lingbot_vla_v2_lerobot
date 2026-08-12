@@ -136,10 +136,11 @@ https://github.com/Robbyant/lingbot-vla-v2
 
 The Qwen3-VL backbone adaptation and sparse-MoE action expert are vendored from the upstream
 LingBot-VLA 2.0 implementation and Hugging Face Transformers, with Apache-2.0 license headers
-retained. FlashAttention is optional. The default attention implementation is eager; `sdpa`,
-`fa2`, `flex`, and `flex_cached` can be selected through the policy config when the runtime
-supports them.
+retained. FlashAttention is optional. The default attention implementation is `sdpa` in the
+model dtype (bf16); `eager`, `fa2`, `flex`, and `flex_cached` can be selected through the policy
+config, and `attention_fp32=true` restores the original fp32-attention parity path.
 
 For MoE inference, the fused expert path tries the optional upstream Triton kernel first, then
 the in-tree Triton grouped-GEMM backend, and finally the grouped-by-expert eager fallback. The
-training path uses the eager fallback for autograd stability.
+training path uses the eager fallback for autograd stability; the eager fallback groups routes with
+a single argsort (one host sync per layer) instead of per-expert nonzero scans.

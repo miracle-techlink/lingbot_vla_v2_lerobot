@@ -238,10 +238,23 @@ class LingbotVLAV2Config(PreTrainedConfig):
     expert_vision_type: str | None = None
 
     # ==================== Modeling internals (FlowMatching / dual-stream expert) ====================
-    # Attention used inside the vendored dual-stream model.
-    # "eager" is the safe default and required where flash-attn is unavailable (e.g. Jetson).
-    attention_implementation: str = "eager"
-    vit_attn_implementation: str = "eager"
+    # Attention used inside the vendored dual-stream model. "sdpa" (fused flash /
+    # memory-efficient kernels, O(L) memory) is the default; "eager" materializes
+    # the [B, H, L, L] score matrix and is only kept for debugging; "fa2" needs the
+    # flash-attn package; "flex"/"flex_cached" use torch flex-attention BlockMasks.
+    attention_implementation: str = "sdpa"
+    vit_attn_implementation: str = "sdpa"
+    # Upcast attention Q/K/V (and the KV cache) to fp32 — the original upstream
+    # parity path. False (default) runs attention in the model dtype (bf16 tensor
+    # cores, half the KV-cache memory); outputs match to bf16 reassociation error.
+    attention_fp32: bool = False
+    # Recompute each dual-stream layer in backward instead of storing activations
+    # (training only; ~30% slower step for a much smaller activation footprint).
+    gradient_checkpointing: bool = False
+    # Compute/log the MoE monitoring metrics (per-layer MaxVio/entropy/dead-expert,
+    # plus the per-metric .item() syncs) once every N training steps. 1 = every
+    # step (original behavior).
+    moe_metrics_interval: int = 50
     use_cache: bool = True
     post_training: bool = True
     freeze_vision_encoder: bool = True

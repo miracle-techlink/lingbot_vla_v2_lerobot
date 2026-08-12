@@ -253,16 +253,26 @@ class Qwen2FusedExperts(nn.Module):
         flat_token = torch.arange(T, device=hidden_states.device).repeat_interleave(top_k)
         flat_weight = routing_weights.reshape(-1).to(torch.float32).unsqueeze(-1)  # [T*top_k, 1]
 
+        # Sort routes by expert once — a single host sync for the split sizes —
+        # instead of a per-expert torch.nonzero (one device sync per expert, i.e.
+        # num_experts syncs per MoE layer per forward).
+        order = torch.argsort(flat_expert)
+        counts = torch.bincount(flat_expert, minlength=num_experts).tolist()
+        sorted_token = flat_token[order]
+        sorted_weight = flat_weight[order]
+
+        offset = 0
         for e in range(num_experts):
-            sel = torch.nonzero(flat_expert == e, as_tuple=True)[0]
-            if sel.numel() == 0:
+            n_e = counts[e]
+            if n_e == 0:
                 continue
-            tok = flat_token[sel]
+            tok = sorted_token[offset : offset + n_e]
             xe = hidden_states[tok]  # [n_e, H] — tokens routed to expert e
             gate = xe @ self.gate_proj[e].t()  # [n_e, I]
             up = xe @ self.up_proj[e].t()  # [n_e, I]
             ye = (F.silu(gate) * up) @ self.down_proj[e].t()  # [n_e, H]
-            out.index_add_(0, tok, flat_weight[sel] * ye.to(torch.float32))
+            out.index_add_(0, tok, sorted_weight[offset : offset + n_e] * ye.to(torch.float32))
+            offset += n_e
         return out.to(hidden_states.dtype)
 
 

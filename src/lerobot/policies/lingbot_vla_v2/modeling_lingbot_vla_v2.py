@@ -6,6 +6,7 @@ import einops
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from typing import List, Optional, Tuple, Union
 
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig, PreTrainedModel
@@ -313,8 +314,9 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
             position_ids = position_ids.masked_fill(pad.expand_as(position_ids), 1)
         return position_ids
 
-    def apply_mrope(self, query_states, key_states, position_ids):
-        position_embeddings = self.qwenvl.model.language_model.rotary_emb(query_states, position_ids)
+    def apply_mrope(self, query_states, key_states, position_ids=None, position_embeddings=None):
+        if position_embeddings is None:
+            position_embeddings = self.qwenvl.model.language_model.rotary_emb(query_states, position_ids)
         return apply_rotary_pos_emb(query_states, key_states, *position_embeddings, unsqueeze_dim=2)
 
     def handle_kv_cache(
@@ -361,6 +363,8 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         ada_cond: list[torch.FloatTensor] = None,
         visual_pos_masks: torch.Tensor | None = None,
         deepstack_visual_embeds: list[torch.Tensor] | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        block_mask=None,
     ):
         models = [self.qwenvl.model.language_model, self.qwen_expert.model]
         num_layers = self.qwenvl.config.text_config.num_hidden_layers
@@ -372,76 +376,74 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
             f"(got action={action_num_layers}, vlm={num_layers})."
         )
 
-        for layer_idx in range(num_layers):
-            query_states = []
-            key_states = []
-            value_states = []
-            for i, hidden_states in enumerate(inputs_embeds):
-                if hidden_states is None:
-                    continue
-                if i == 1:
-                    q, k, v = models[i].layers[layer_idx](hidden_states, compute_kqv=True, ada_cond=ada_cond)
-                else:
-                    q, k, v = models[i].layers[layer_idx](hidden_states, compute_kqv=True)
-                query_states.append(q.float())
-                key_states.append(k.float())
-                value_states.append(v.float())
+        # Attention runs in the model (half) dtype by default; attention_fp32=True
+        # restores the original fp32 upcast used for bit-exact parity checks.
+        attn_fp32 = getattr(self.config, "attention_fp32", False)
 
-            query_states = torch.cat(query_states, dim=1)
-            key_states = torch.cat(key_states, dim=1)
-            value_states = torch.cat(value_states, dim=1)
-            query_states, key_states = self.apply_mrope(query_states, key_states, position_ids)
-            key_states, value_states, past_key_values = self.handle_kv_cache(
-                key_states,
-                value_states,
-                layer_idx,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                fill_kv_cache=fill_kv_cache,
+        # mrope cos/sin depend only on position_ids (and dtype/device) — compute once
+        # per forward instead of once per layer. Callers with a loop-invariant
+        # position_ids (e.g. the flow-matching denoise loop) can pass a precomputed
+        # ``position_embeddings`` to skip this entirely.
+        if position_embeddings is None:
+            rep = next(h for h in inputs_embeds if h is not None)
+            # rotary_emb casts cos/sin to the representative tensor's dtype; under
+            # attention_fp32 keep the old fp32 cos/sin for bit-exact parity.
+            if attn_fp32:
+                rep = rep.float()
+            position_embeddings = self.qwenvl.model.language_model.rotary_emb(rep, position_ids)
+
+        _full_block_mask = block_mask
+        if _full_block_mask is None and self.config.attention_implementation == "flex_cached":
+            # Build once per forward (not per layer). q_len is the concatenated stream
+            # length; with a filled KV cache the kv side additionally covers the prefix.
+            q_len = sum(h.shape[1] for h in inputs_embeds if h is not None)
+            kv_len = q_len
+            if use_cache and not fill_kv_cache and past_key_values:
+                kv_len += past_key_values[0]["key_states"].shape[1]
+            _full_block_mask = build_block_mask(
+                attention_mask,
+                self.qwenvl.config.text_config.num_attention_heads,
+                q_len,
+                kv_len,
             )
-            if self.config.attention_implementation == "flex_cached":
-                if layer_idx == 0:
-                    _full_len = query_states.shape[1]
-                    _full_block_mask = build_block_mask(
-                        attention_mask,
-                        self.qwenvl.config.text_config.num_attention_heads,
-                        _full_len,
-                        _full_len,
-                    )
-                att_output = flex_attention_with_block_mask(
-                    query_states, key_states, value_states, _full_block_mask, query_states.shape[1]
-                )
-            else:
-                att_output = self.attention_interface(query_states, key_states, value_states, attention_mask)
 
-            outputs_embeds = []
-            start = 0
-            for i, hidden_states in enumerate(inputs_embeds):
-                if hidden_states is None:
-                    outputs_embeds.append(None)
-                    continue
-                end = start + hidden_states.shape[1]
-                if i == 1:
-                    out_emb, router_logits = models[i].layers[layer_idx](
-                        hidden_states,
-                        att_output,
-                        start,
-                        end,
-                        output_atten=True,
-                        ada_cond=ada_cond,
-                    )
-                    if router_logits is not None:
-                        router_logits_list.append(router_logits)
-                else:
-                    out_emb = models[i].layers[layer_idx](
-                        hidden_states, att_output, start, end, output_atten=True
-                    )
-                    out_emb = self._apply_deepstack(
-                        out_emb, layer_idx, visual_pos_masks, deepstack_visual_embeds
-                    )
-                outputs_embeds.append(out_emb)
-                start = end
-            inputs_embeds = outputs_embeds
+        use_gradient_checkpointing = (
+            getattr(self.config, "gradient_checkpointing", False)
+            and self.training
+            and torch.is_grad_enabled()
+            and not use_cache
+        )
+
+        for layer_idx in range(num_layers):
+            if use_gradient_checkpointing:
+                inputs_embeds, layer_router_logits = self._checkpointed_layer(
+                    layer_idx,
+                    inputs_embeds,
+                    attention_mask,
+                    position_embeddings,
+                    ada_cond,
+                    visual_pos_masks,
+                    deepstack_visual_embeds,
+                    _full_block_mask,
+                    attn_fp32,
+                )
+                router_logits_list.extend(layer_router_logits)
+                continue
+            inputs_embeds, layer_router_logits, _full_block_mask, past_key_values = self._layer_forward(
+                layer_idx,
+                inputs_embeds,
+                attention_mask,
+                position_embeddings,
+                past_key_values,
+                use_cache,
+                fill_kv_cache,
+                ada_cond,
+                visual_pos_masks,
+                deepstack_visual_embeds,
+                _full_block_mask,
+                attn_fp32,
+            )
+            router_logits_list.extend(layer_router_logits)
 
         outputs_embeds = []
         for i, hidden_states in enumerate(inputs_embeds):
@@ -453,6 +455,137 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
             else:
                 outputs_embeds.append(models[i].norm(hidden_states))
         return outputs_embeds, past_key_values, router_logits_list
+
+    def _layer_forward(
+        self,
+        layer_idx,
+        inputs_embeds,
+        attention_mask,
+        position_embeddings,
+        past_key_values,
+        use_cache,
+        fill_kv_cache,
+        ada_cond,
+        visual_pos_masks,
+        deepstack_visual_embeds,
+        block_mask,
+        attn_fp32,
+    ):
+        """One dual-stream layer: per-stream QKV -> joint attention -> per-stream out/MLP."""
+        models = [self.qwenvl.model.language_model, self.qwen_expert.model]
+        router_logits_list = []
+        query_states = []
+        key_states = []
+        value_states = []
+        for i, hidden_states in enumerate(inputs_embeds):
+            if hidden_states is None:
+                continue
+            if i == 1:
+                q, k, v = models[i].layers[layer_idx](hidden_states, compute_kqv=True, ada_cond=ada_cond)
+            else:
+                q, k, v = models[i].layers[layer_idx](hidden_states, compute_kqv=True)
+            if attn_fp32:
+                q, k, v = q.float(), k.float(), v.float()
+            query_states.append(q)
+            key_states.append(k)
+            value_states.append(v)
+
+        query_states = torch.cat(query_states, dim=1)
+        key_states = torch.cat(key_states, dim=1)
+        value_states = torch.cat(value_states, dim=1)
+        query_states, key_states = self.apply_mrope(
+            query_states, key_states, position_embeddings=position_embeddings
+        )
+        key_states, value_states, past_key_values = self.handle_kv_cache(
+            key_states,
+            value_states,
+            layer_idx,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            fill_kv_cache=fill_kv_cache,
+        )
+        if self.config.attention_implementation == "flex_cached":
+            if block_mask is None:
+                block_mask = build_block_mask(
+                    attention_mask,
+                    self.qwenvl.config.text_config.num_attention_heads,
+                    query_states.shape[1],
+                    key_states.shape[1],
+                )
+            att_output = flex_attention_with_block_mask(
+                query_states,
+                key_states,
+                value_states,
+                block_mask,
+                query_states.shape[1],
+                force_fp32=attn_fp32,
+            )
+        elif self.config.attention_implementation == "flex":
+            att_output = flex_attention_forward(
+                query_states, key_states, value_states, attention_mask, force_fp32=attn_fp32
+            )
+        else:
+            att_output = self.attention_interface(query_states, key_states, value_states, attention_mask)
+
+        outputs_embeds = []
+        start = 0
+        for i, hidden_states in enumerate(inputs_embeds):
+            if hidden_states is None:
+                outputs_embeds.append(None)
+                continue
+            end = start + hidden_states.shape[1]
+            if i == 1:
+                out_emb, router_logits = models[i].layers[layer_idx](
+                    hidden_states,
+                    att_output,
+                    start,
+                    end,
+                    output_atten=True,
+                    ada_cond=ada_cond,
+                )
+                if router_logits is not None:
+                    router_logits_list.append(router_logits)
+            else:
+                out_emb = models[i].layers[layer_idx](
+                    hidden_states, att_output, start, end, output_atten=True
+                )
+                out_emb = self._apply_deepstack(
+                    out_emb, layer_idx, visual_pos_masks, deepstack_visual_embeds
+                )
+            outputs_embeds.append(out_emb)
+            start = end
+        return outputs_embeds, router_logits_list, block_mask, past_key_values
+
+    def _checkpointed_layer(
+        self,
+        layer_idx,
+        inputs_embeds,
+        attention_mask,
+        position_embeddings,
+        ada_cond,
+        visual_pos_masks,
+        deepstack_visual_embeds,
+        block_mask,
+        attn_fp32,
+    ):
+        """Gradient-checkpointed layer step (training only, KV cache disabled)."""
+        outputs_embeds, router_logits_list, _, _ = torch_checkpoint(
+            self._layer_forward,
+            layer_idx,
+            inputs_embeds,
+            attention_mask,
+            position_embeddings,
+            None,  # past_key_values
+            False,  # use_cache
+            False,  # fill_kv_cache
+            ada_cond,
+            visual_pos_masks,
+            deepstack_visual_embeds,
+            block_mask,
+            attn_fp32,
+            use_reentrant=False,
+        )
+        return outputs_embeds, router_logits_list
 
     def get_attention_interface(self):
         if self.config.attention_implementation == "flex":
@@ -494,6 +627,8 @@ class FlowMatchingV2(FlowMatchingV1):
             "final_norm_adanorm",
             "precompute_grid_thw",
             "vit_attn_implementation",
+            "attention_fp32",
+            "gradient_checkpointing",
             "use_moe",
             "bias_update_speed",
             "token_moe_layers",
@@ -824,6 +959,7 @@ class FlowMatchingV2(FlowMatchingV1):
         future_video_targets=None,
         future_video_cls_targets=None,
         future_video_current_patch=None,
+        collect_metrics=True,
     ) -> Tensor:
         dtype = state.dtype
         device = state.device
@@ -877,8 +1013,10 @@ class FlowMatchingV2(FlowMatchingV1):
             vlm_position_ids=prefix_position_ids,
             past_key_values=None,
             inputs_embeds=[prefix_embs, suffix_embs],
-            use_cache=self.config.use_cache,
-            fill_kv_cache=True,
+            # Training never reuses a KV cache — filling one here only wastes memory
+            # (a full-sequence fp32/bf16 K/V copy per layer, discarded immediately).
+            use_cache=False,
+            fill_kv_cache=False,
             ada_cond=time_embs if getattr(self.config, "adanorm_time", False) else None,
             visual_pos_masks=visual_pos_masks,
             deepstack_visual_embeds=deepstack_visual_embeds,
@@ -957,7 +1095,9 @@ class FlowMatchingV2(FlowMatchingV1):
         elif loss_type == "L1_fm":
             losses = F.l1_loss(u_t, v_t, reduction="none")
 
-        seq_wise_loss, router_z_loss, moe_metrics = self._moe_losses_and_metrics(router_logits_list, losses)
+        seq_wise_loss, router_z_loss, moe_metrics = self._moe_losses_and_metrics(
+            router_logits_list, losses, collect_metrics=collect_metrics
+        )
         if align_metrics:
             moe_metrics.update(align_metrics)
         return (
@@ -1041,6 +1181,11 @@ class FlowMatchingV2(FlowMatchingV1):
                 )
                 self._compiled_predict_velocity = predict_velocity_fn
 
+        # Loop-invariant tensors (suffix 2D masks / position ids / mrope cos-sin /
+        # flex BlockMask) are computed on the first predict_velocity call and reused
+        # for the remaining denoise steps — they depend on the prefix masks only,
+        # not on x_t or the timestep.
+        denoise_cache: dict = {}
         while time >= -dt / 2:
             count += 1
             expanded_time = time.expand(bsize)
@@ -1051,6 +1196,7 @@ class FlowMatchingV2(FlowMatchingV1):
                 x_t,
                 expanded_time,
                 prefix_position_ids=prefix_position_ids,
+                _denoise_cache=denoise_cache,
             )
 
             x_t += dt * v_t
@@ -1066,8 +1212,15 @@ class FlowMatchingV2(FlowMatchingV1):
         x_t,
         timestep,
         prefix_position_ids=None,
+        _denoise_cache: dict | None = None,
     ):
-        """Predict velocity at time t using cached Qwen3-VL prefix states."""
+        """Predict velocity at time t using cached Qwen3-VL prefix states.
+
+        ``_denoise_cache`` (optional) is a dict that persists across the denoise
+        loop: the suffix attention mask, position ids, mrope cos/sin and flex
+        BlockMask are loop-invariant, so they are computed on the first step and
+        reused afterwards.
+        """
         if prefix_position_ids is None:
             raise ValueError("FlowMatchingV2.predict_velocity requires Qwen3-VL prefix_position_ids.")
 
@@ -1078,44 +1231,65 @@ class FlowMatchingV2(FlowMatchingV1):
         )
 
         suffix_len = suffix_pad_masks.shape[1]
-        batch_size = prefix_pad_masks.shape[0]
         prefix_len = prefix_pad_masks.shape[1]
-        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(
-            batch_size,
-            suffix_len,
-            prefix_len,
-        )
-        suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
-        full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
-        if self.block_future_depth_to_action:
-            # Query rows here are all suffix (state/action), so row start is 0.
-            full_att_2d_masks = block_suffix_to_fv_(
+        cache = _denoise_cache if _denoise_cache is not None else {}
+        if "full_att_2d_masks" not in cache:
+            batch_size = prefix_pad_masks.shape[0]
+            prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(
+                batch_size,
+                suffix_len,
+                prefix_len,
+            )
+            suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
+            full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+            if self.block_future_depth_to_action:
+                # Query rows here are all suffix (state/action), so row start is 0.
+                full_att_2d_masks = block_suffix_to_fv_(
+                    full_att_2d_masks,
+                    suffix_row_start=0,
+                    prefix_len=prefix_len,
+                    num_task_tokens=self.num_task_tokens,
+                )
+            full_att_2d_masks = self._block_suffix_to_future_video_if_enabled_(
                 full_att_2d_masks,
                 suffix_row_start=0,
                 prefix_len=prefix_len,
-                num_task_tokens=self.num_task_tokens,
             )
-        full_att_2d_masks = self._block_suffix_to_future_video_if_enabled_(
-            full_att_2d_masks,
-            suffix_row_start=0,
-            prefix_len=prefix_len,
-        )
 
-        full_position_ids = self._build_full_position_ids(
-            prefix_position_ids,
-            prefix_pad_masks,
-            suffix_pad_masks,
-        )
-        position_ids = full_position_ids[:, :, -suffix_len:]
+            full_position_ids = self._build_full_position_ids(
+                prefix_position_ids,
+                prefix_pad_masks,
+                suffix_pad_masks,
+            )
+            position_ids = full_position_ids[:, :, -suffix_len:]
+            core = self.qwenvl_with_expert
+            rep = (
+                suffix_embs.float()
+                if getattr(core.config, "attention_fp32", False)
+                else suffix_embs
+            )
+            position_embeddings = core.qwenvl.model.language_model.rotary_emb(rep, position_ids)
+            cache["full_att_2d_masks"] = full_att_2d_masks
+            cache["position_ids"] = position_ids
+            cache["position_embeddings"] = position_embeddings
+            if core.config.attention_implementation == "flex_cached":
+                cache["block_mask"] = build_block_mask(
+                    full_att_2d_masks,
+                    core.qwenvl.config.text_config.num_attention_heads,
+                    suffix_len,
+                    prefix_len + suffix_len,
+                )
 
         outputs_embeds, _, _ = self.qwenvl_with_expert.forward(
-            attention_mask=full_att_2d_masks,
-            position_ids=position_ids,
+            attention_mask=cache["full_att_2d_masks"],
+            position_ids=cache["position_ids"],
             past_key_values=past_key_values,
             inputs_embeds=[None, suffix_embs],
             use_cache=self.config.use_cache,
             fill_kv_cache=False,
             ada_cond=time_embs if getattr(self.config, "adanorm_time", False) else None,
+            position_embeddings=cache["position_embeddings"],
+            block_mask=cache.get("block_mask"),
         )
         suffix_out = outputs_embeds[1]
         suffix_out = suffix_out[:, -self.config.n_action_steps :]
@@ -1127,7 +1301,7 @@ class FlowMatchingV2(FlowMatchingV1):
             v_t = self.action_out_proj(suffix_out)
         return v_t
 
-    def _moe_losses_and_metrics(self, router_logits_list, losses):
+    def _moe_losses_and_metrics(self, router_logits_list, losses, collect_metrics=True):
         router_z_loss_coeff = getattr(self.config, "router_z_loss_coeff", 0)
         router_z_loss = losses.new_zeros(())
         router_z_layer_losses = None  # per-layer raw z-loss (pre-coeff), for monitoring
@@ -1163,7 +1337,10 @@ class FlowMatchingV2(FlowMatchingV1):
                 seq_wise_loss = seq_wise_loss_coeff * torch.stack(seqwise_layer_losses).mean()
 
         moe_metrics = {}
-        if router_logits_list:
+        # Monitoring-only block (per-layer MaxVio/entropy/dead-expert stats + the
+        # per-metric .item() syncs in the caller). Gated by collect_metrics so it
+        # runs on logging steps only, not every training step.
+        if collect_metrics and router_logits_list:
             token_moe_layers_list = sorted(getattr(self.config, "token_moe_layers", None) or [])
             all_moe_indices = token_moe_layers_list
             token_expert_counts = []
@@ -1416,6 +1593,11 @@ class LingbotVLAV2Policy(PreTrainedPolicy):
         action_dim = actions.shape[-1]
         actions = F.pad(actions, (0, self.config.max_action_dim - action_dim))
 
+        # MoE monitoring metrics (per-layer stats + .item() syncs) only on logging steps.
+        self._train_step_count = getattr(self, "_train_step_count", 0) + 1
+        interval = max(1, int(getattr(self.config, "moe_metrics_interval", 1)))
+        collect_metrics = self._train_step_count % interval == 0
+
         (
             losses,
             loss_depth,
@@ -1444,6 +1626,7 @@ class LingbotVLAV2Policy(PreTrainedPolicy):
             future_video_targets=batch.get("future_video_targets"),
             future_video_cls_targets=batch.get("future_video_cls_targets"),
             future_video_current_patch=batch.get("future_video_current_patch"),
+            collect_metrics=collect_metrics,
         )
 
         joint_mask = batch.get("joint_mask")

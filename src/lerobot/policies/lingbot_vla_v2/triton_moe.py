@@ -61,6 +61,11 @@ if _HAS_TRITON:
         start = tl.load(cumsum_ptr + e).to(tl.int64)
         end = tl.load(cumsum_ptr + e + 1).to(tl.int64)
         m_size = end - start
+        # The grid's m-dimension is sized by a worst-case upper bound (no host
+        # sync for the true per-expert max), so most blocks are out of range —
+        # exit before touching the K loop.
+        if pid_m * BLOCK_M >= m_size:
+            return
         offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)  # within-expert row offset
         row_valid = offs_m < m_size
         rows = start + offs_m.to(tl.int64)  # global sorted-row index
@@ -135,7 +140,10 @@ def triton_grouped_moe(experts, routing_weights, selected_experts, hidden_states
     counts = torch.bincount(flat_expert, minlength=E)
     cumsum = torch.zeros(E + 1, dtype=torch.int32, device=hidden_states.device)
     cumsum[1:] = counts.cumsum(0).to(torch.int32)
-    max_m = int(counts.max().item())
+    # Sync-free grid bound: top-k selects DISTINCT experts per token, so no expert
+    # can receive more than T routes. This avoids `counts.max().item()`, which
+    # forced a host sync in every MoE layer of every denoise step.
+    max_m = T
 
     gate = _grouped_gemm(x_sorted, experts.gate_proj.contiguous(), cumsum, max_m, inter_dim, H)
     up = _grouped_gemm(x_sorted, experts.up_proj.contiguous(), cumsum, max_m, inter_dim, H)
