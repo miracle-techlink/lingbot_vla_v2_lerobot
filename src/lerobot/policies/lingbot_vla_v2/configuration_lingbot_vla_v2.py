@@ -249,8 +249,14 @@ class LingbotVLAV2Config(PreTrainedConfig):
     # cores, half the KV-cache memory); outputs match to bf16 reassociation error.
     attention_fp32: bool = False
     # Recompute each dual-stream layer in backward instead of storing activations
-    # (training only; ~30% slower step for a much smaller activation footprint).
+    # (training only; ~60% slower step for ~half the activation memory — enables
+    # 2-4x larger batches on a single 80GB card).
     gradient_checkpointing: bool = False
+    # torch.compile the per-step velocity prediction (inductor fusion, CUDA graphs
+    # disabled). The denoise loop is launch-overhead bound (51-token suffix through
+    # 36 dual-stream layers), so this gives a large latency win on GPU. First call
+    # compiles (minutes); shapes must stay fixed across calls.
+    compile_predict_velocity: bool = False
     # Compute/log the MoE monitoring metrics (per-layer MaxVio/entropy/dead-expert,
     # plus the per-metric .item() syncs) once every N training steps. 1 = every
     # step (original behavior).

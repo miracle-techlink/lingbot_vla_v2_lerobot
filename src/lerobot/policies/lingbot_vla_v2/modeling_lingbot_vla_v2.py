@@ -1484,6 +1484,10 @@ class LingbotVLAV2Policy(PreTrainedPolicy):
         # missing robot_config just falls back to a plain truncation (see _postprocess_actions).
         self._action_unapply_ft = self._build_action_unapply_transform()
 
+        # Opt-in torch.compile for the denoise inner loop (see config docs).
+        if getattr(self.config, "compile_predict_velocity", False):
+            self.model._use_compile_predict_velocity = True
+
         self.reset()
         torch.set_float32_matmul_precision("high")
 
