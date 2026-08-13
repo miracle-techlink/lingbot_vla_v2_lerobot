@@ -264,6 +264,13 @@ class LingbotVLAV2Config(PreTrainedConfig):
     # parity path. False (default) runs attention in the model dtype (bf16 tensor
     # cores, half the KV-cache memory); outputs match to bf16 reassociation error.
     attention_fp32: bool = False
+    # Force a specific SDPA kernel backend (an `SDPBackend` enum name, e.g.
+    # "CUDNN_ATTENTION") instead of torch's auto-selection. Only applies when
+    # attention_implementation="sdpa". Motivation: with bool masks torch 2.8
+    # auto-selects mem_efficient, but the cuDNN backend is ~14% faster end-to-end
+    # in training (measured on A100, B=4, bf16) and cuts activation memory by a
+    # third. None (default) keeps torch auto-selection.
+    sdpa_backend: str | None = None
     # Recompute each dual-stream layer in backward instead of storing activations
     # (training only; ~60% slower step for ~half the activation memory — enables
     # 2-4x larger batches on a single 80GB card).
@@ -313,6 +320,9 @@ class LingbotVLAV2Config(PreTrainedConfig):
     optimizer_eps: float = 1e-8
     optimizer_weight_decay: float = 0.0
     optimizer_grad_clip_norm: float = 1.0
+    # fused AdamW (single-kernel step on GPU). Same math as the default foreach
+    # path; measured a few % faster per training step on A100.
+    optimizer_fused: bool = False
 
     scheduler_warmup_steps: int = 1000
     scheduler_decay_steps: int = 30000
@@ -386,6 +396,7 @@ class LingbotVLAV2Config(PreTrainedConfig):
             eps=self.optimizer_eps,
             weight_decay=self.optimizer_weight_decay,
             grad_clip_norm=self.optimizer_grad_clip_norm,
+            fused=getattr(self, "optimizer_fused", False),
         )
 
     def get_scheduler_preset(self):

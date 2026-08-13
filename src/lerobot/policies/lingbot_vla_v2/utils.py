@@ -273,6 +273,7 @@ def our_sdpa_attention_forward(
     key_states: torch.Tensor,
     value_states: torch.Tensor,
     attention_mask: torch.Tensor,
+    sdpa_backend: str | None = None,
 ):
     """SDPA attention with the SAME (b, l, h, d) in / (b, l, h*d) out contract as
     ``our_eager_attention_forward``.
@@ -289,6 +290,8 @@ def our_sdpa_attention_forward(
         query_states: ``[batch, seq, num_att_heads, head_dim]``.
         key_states / value_states: ``[batch, seq, num_kv_heads, head_dim]``.
         attention_mask: bool tensor, ``True`` = attend; ``[batch, seq, seq]`` or ``[batch, 1, seq, seq]``.
+        sdpa_backend: optional ``SDPBackend`` enum name (e.g. "CUDNN_ATTENTION") to force a
+            specific kernel backend instead of torch auto-selection.
     """
     bsize, seq_len, num_att_heads, head_dim = query_states.shape
     num_kv_heads = key_states.shape[2]
@@ -305,13 +308,22 @@ def our_sdpa_attention_forward(
         if mask.dtype != torch.bool:
             mask = mask.bool()
 
-    att_output = nn.functional.scaled_dot_product_attention(
-        q,
-        k,
-        v,
-        attn_mask=mask,  # bool: True keeps, False masks (matches the eager where-mask)
-        enable_gqa=num_kv_heads != num_att_heads,
-    )
+    if sdpa_backend is not None:
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+
+        backend_ctx = sdpa_kernel([getattr(SDPBackend, sdpa_backend)])
+    else:
+        import contextlib
+
+        backend_ctx = contextlib.nullcontext()
+    with backend_ctx:
+        att_output = nn.functional.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=mask,  # bool: True keeps, False masks (matches the eager where-mask)
+            enable_gqa=num_kv_heads != num_att_heads,
+        )
 
     # (b, h, l, d) -> (b, l, h*d)
     att_output = att_output.transpose(1, 2).reshape(bsize, seq_len, num_att_heads * head_dim)

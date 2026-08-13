@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 from collections import deque
 
 import einops
@@ -594,6 +595,9 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
             logger.debug("Using Flex Cached attention with prebuilt BlockMask")
             return flex_attention_forward
         if self.config.attention_implementation == "sdpa":
+            sdpa_backend = getattr(self.config, "sdpa_backend", None)
+            if sdpa_backend is not None:
+                return functools.partial(our_sdpa_attention_forward, sdpa_backend=sdpa_backend)
             return our_sdpa_attention_forward
         if self.config.attention_implementation == "eager":
             logger.debug("Using Eager attention")
@@ -627,6 +631,7 @@ class FlowMatchingV2(FlowMatchingV1):
             "precompute_grid_thw",
             "vit_attn_implementation",
             "attention_fp32",
+            "sdpa_backend",
             "gradient_checkpointing",
             "use_moe",
             "bias_update_speed",
