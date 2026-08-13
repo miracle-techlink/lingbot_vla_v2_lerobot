@@ -354,14 +354,28 @@ def bench_train(args):
     # fwd+bwd). Mirrors lerobot-train: AdamW from the policy preset + grad clipping.
     optimizer = None
     if getattr(args, "e2e", False):
-        optimizer = torch.optim.AdamW(
-            policy.parameters(),
-            lr=policy.config.optimizer_lr,
-            betas=policy.config.optimizer_betas,
-            eps=policy.config.optimizer_eps,
-            weight_decay=policy.config.optimizer_weight_decay,
-            fused=getattr(args, "fused_optim", False),
-        )
+        if getattr(args, "optim_8bit", False):
+            # 8-bit AdamW (bitsandbytes): m+v states in int8 — cuts optimizer memory
+            # ~4x vs fp32 states (43.3GB -> ~10.8GB for 5.8B trainable params),
+            # which is what lets B>=4 e2e fit on a single 80GB card.
+            import bitsandbytes as bnb
+
+            optimizer = bnb.optim.AdamW8bit(
+                policy.parameters(),
+                lr=policy.config.optimizer_lr,
+                betas=policy.config.optimizer_betas,
+                eps=policy.config.optimizer_eps,
+                weight_decay=policy.config.optimizer_weight_decay,
+            )
+        else:
+            optimizer = torch.optim.AdamW(
+                policy.parameters(),
+                lr=policy.config.optimizer_lr,
+                betas=policy.config.optimizer_betas,
+                eps=policy.config.optimizer_eps,
+                weight_decay=policy.config.optimizer_weight_decay,
+                fused=getattr(args, "fused_optim", False),
+            )
     clip_norm = policy.config.optimizer_grad_clip_norm
     wall = WallTimer()
     for i in range(args.warmup + args.iters):
@@ -397,6 +411,7 @@ def bench_train(args):
         "grad_ckpt": getattr(policy.model.qwenvl_with_expert.config, "gradient_checkpointing", None),
         "e2e": optimizer is not None,
         "fused_optim": getattr(args, "fused_optim", False) if optimizer is not None else None,
+        "optim_8bit": getattr(args, "optim_8bit", False) if optimizer is not None else None,
         "batch": B,
         "iters": n,
         "step_ms": wall.elapsed_ms / n,
@@ -478,6 +493,11 @@ def main():
         "--fused-optim",
         action="store_true",
         help="with --e2e: use fused AdamW (single-kernel step)",
+    )
+    p.add_argument(
+        "--optim-8bit",
+        action="store_true",
+        help="with --e2e: use bitsandbytes AdamW8bit (int8 m+v states, ~4x less optimizer memory)",
     )
     p.add_argument(
         "--moe-dense-max-tokens",
