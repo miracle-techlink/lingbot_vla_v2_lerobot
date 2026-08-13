@@ -234,6 +234,10 @@ def load_policy(args):
         policy.config.vit_attn_implementation = args.vit_attn
     if getattr(args, "attn_fp32", None) is not None:
         core.config.attention_fp32 = args.attn_fp32
+    if getattr(args, "sdpa_backend", None):
+        policy.config.sdpa_backend = args.sdpa_backend
+        core.config.sdpa_backend = args.sdpa_backend
+        core.attention_interface = core.get_attention_interface()
     if getattr(args, "grad_ckpt", False):
         core.config.gradient_checkpointing = True
     if getattr(args, "moe_dense_max_tokens", None) is not None:
@@ -346,6 +350,19 @@ def bench_train(args):
 
     T = Timers()
     install_probes(policy, T)
+    # --e2e: full training step = fwd + bwd + grad-clip + optimizer.step (not just
+    # fwd+bwd). Mirrors lerobot-train: AdamW from the policy preset + grad clipping.
+    optimizer = None
+    if getattr(args, "e2e", False):
+        optimizer = torch.optim.AdamW(
+            policy.parameters(),
+            lr=policy.config.optimizer_lr,
+            betas=policy.config.optimizer_betas,
+            eps=policy.config.optimizer_eps,
+            weight_decay=policy.config.optimizer_weight_decay,
+            fused=getattr(args, "fused_optim", False),
+        )
+    clip_norm = policy.config.optimizer_grad_clip_norm
     wall = WallTimer()
     for i in range(args.warmup + args.iters):
         if i == args.warmup:
@@ -357,20 +374,29 @@ def bench_train(args):
         try:
             loss, loss_dict = policy.forward(batch)
             loss.backward()
+            if optimizer is not None:
+                torch.nn.utils.clip_grad_norm_(policy.parameters(), clip_norm)
+                optimizer.step()
         except torch.OutOfMemoryError:
             torch.cuda.synchronize()
             summ = torch.cuda.memory_summary()
             print("OOM at batch", B)
             print("\n".join(summ.splitlines()[:12]))
             raise
-        policy.zero_grad(set_to_none=True)
+        if optimizer is not None:
+            optimizer.zero_grad(set_to_none=True)
+        else:
+            policy.zero_grad(set_to_none=True)
         wall.stop()
     n = args.iters
     out = {
         "mode": "train",
         "attn": policy.model.qwenvl_with_expert.config.attention_implementation,
+        "sdpa_backend": getattr(policy.model.qwenvl_with_expert.config, "sdpa_backend", None),
         "attn_fp32": getattr(policy.model.qwenvl_with_expert.config, "attention_fp32", None),
         "grad_ckpt": getattr(policy.model.qwenvl_with_expert.config, "gradient_checkpointing", None),
+        "e2e": optimizer is not None,
+        "fused_optim": getattr(args, "fused_optim", False) if optimizer is not None else None,
         "batch": B,
         "iters": n,
         "step_ms": wall.elapsed_ms / n,
@@ -438,6 +464,21 @@ def main():
         help="force fp32 attention upcast (parity path) on/off",
     )
     p.add_argument("--grad-ckpt", action="store_true", help="enable gradient checkpointing")
+    p.add_argument(
+        "--sdpa-backend",
+        default=None,
+        help="force an SDPA kernel backend (SDPBackend enum name, e.g. CUDNN_ATTENTION)",
+    )
+    p.add_argument(
+        "--e2e",
+        action="store_true",
+        help="train mode: time the full step (fwd+bwd+grad-clip+optimizer.step), not just fwd+bwd",
+    )
+    p.add_argument(
+        "--fused-optim",
+        action="store_true",
+        help="with --e2e: use fused AdamW (single-kernel step)",
+    )
     p.add_argument(
         "--moe-dense-max-tokens",
         type=int,
