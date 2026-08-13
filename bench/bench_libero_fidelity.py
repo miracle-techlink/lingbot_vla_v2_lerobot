@@ -102,10 +102,16 @@ def main():
     p.add_argument("--compile", action="store_true")
     p.add_argument("--compile-mode", default="default")
     p.add_argument("--num-steps", type=int, default=10)
+    p.add_argument("--dtype", default=None, choices=["float16", "bfloat16", "float32"],
+                   help="cast the whole model to this dtype after load")
+    p.add_argument("--gpu-preprocess", action="store_true",
+                   help="run image preprocessing on GPU (batched single processor call)")
     p.add_argument("--noise-seed", type=int, default=1234)
     args = p.parse_args()
 
     policy = LingbotVLAV2Policy.from_pretrained(args.ckpt)
+    if args.dtype:
+        policy.model.to(getattr(torch, args.dtype))
     core = policy.model.qwenvl_with_expert
     if args.attn:
         policy.config.attention_implementation = args.attn
@@ -123,6 +129,8 @@ def main():
         import torch._dynamo as _dynamo
         _dynamo.config.recompile_limit = 64
     policy.config.num_steps = args.num_steps
+    if args.gpu_preprocess:
+        policy.config.preprocess_device = "cuda"
     policy.to("cuda").eval()
 
     preprocessor, _ = make_pre_post_processors(

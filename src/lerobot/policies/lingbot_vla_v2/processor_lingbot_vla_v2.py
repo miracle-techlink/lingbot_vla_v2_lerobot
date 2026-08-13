@@ -110,6 +110,10 @@ class LingbotVLAV2FeatureTransformStep(ProcessorStep):
     # uses 16px patches + 2x2 merge (=1024 px/token), so 1,048,576 px ~= 1024 tokens.
     image_max_pixels: int = 262144
     image_min_pixels: int = 131072
+    # When set (e.g. "cuda"), camera images are uploaded to this device and run
+    # through the HF image processor in one batched call, with the outputs staying
+    # on-device for the vision tower. None keeps the per-camera CPU path.
+    preprocess_device: str | None = None
 
     _feature_transform: Any = field(default=None, init=False, repr=False)
 
@@ -172,6 +176,7 @@ class LingbotVLAV2FeatureTransformStep(ProcessorStep):
             norm_stats_path=self.norm_stats_path,
             robot_config=self.robot_config,
             norm_stats=self.norm_stats,
+            preprocess_device=self.preprocess_device,
         )
 
     def _iter_items(self, observation: dict, action, task):
@@ -271,6 +276,7 @@ class LingbotVLAV2FeatureTransformStep(ProcessorStep):
             # to defaults and mismatched the checkpoint's training resolution.
             "image_max_pixels": self.image_max_pixels,
             "image_min_pixels": self.image_min_pixels,
+            "preprocess_device": self.preprocess_device,
         }
 
     def transform_features(
@@ -318,6 +324,7 @@ def make_lingbot_vla_v2_pre_post_processors(
         resize_imgs_with_padding=tuple(config.resize_imgs_with_padding),
         image_max_pixels=config.image_max_pixels,
         image_min_pixels=config.image_min_pixels,
+        preprocess_device=config.preprocess_device,
     )
 
     input_steps: list[ProcessorStep] = [
@@ -388,6 +395,8 @@ def make_lingbot_vla_v2_pre_post_processors_from_pretrained(
         feature_step_overrides["robot_config"] = config.robot_config
     if config.norm_stats is not None:
         feature_step_overrides["norm_stats"] = config.norm_stats
+    if getattr(config, "preprocess_device", None) is not None:
+        feature_step_overrides["preprocess_device"] = config.preprocess_device
     if feature_step_overrides:
         preprocessor_overrides["lingbot_vla_v2_feature_transform"] = feature_step_overrides
 

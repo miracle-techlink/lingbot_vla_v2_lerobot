@@ -114,6 +114,14 @@ class LingbotVLAV2Config(PreTrainedConfig):
     image_max_pixels: int = 262144
     image_min_pixels: int = 131072
 
+    # Optional device (e.g. "cuda") for the image preprocessing fast path: camera
+    # frames are uploaded once and the HF image processor runs batched on-device
+    # (resize/rescale/normalize/patchify are all torch ops in the torchvision
+    # backend), so the vision tower consumes GPU tensors without a second copy.
+    # None keeps the default per-camera CPU path. Inference-only; training
+    # (augmentation) and depth-align paths always stay on CPU.
+    preprocess_device: str | None = None
+
     # Number of flow-matching denoising steps at inference.
     num_steps: int = 10
 

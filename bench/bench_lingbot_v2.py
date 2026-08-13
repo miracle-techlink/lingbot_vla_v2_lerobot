@@ -219,6 +219,11 @@ def make_obs(ckpt, seed=0):
 
 def load_policy(args):
     policy = LingbotVLAV2Policy.from_pretrained(args.ckpt)
+    if getattr(args, "dtype", None):
+        # Post-hoc whole-model cast (vision tower + both streams). bf16 weights cast
+        # to fp16 exactly for |w| in fp16 normal range; activations are the risk this
+        # flag exists to measure.
+        policy.model.to(getattr(torch, args.dtype))
     core = policy.model.qwenvl_with_expert
     if args.attn:
         policy.config.attention_implementation = args.attn
@@ -242,6 +247,8 @@ def load_policy(args):
 def bench_infer(args):
     policy = load_policy(args)
     policy.config.num_steps = args.num_steps
+    if getattr(args, "gpu_preprocess", False):
+        policy.config.preprocess_device = "cuda"
     if getattr(args, "compile", False):
         policy.model._use_compile_predict_velocity = True
         policy.model._compile_predict_velocity_mode = args.compile_mode
@@ -287,6 +294,8 @@ def bench_infer(args):
         "attn": policy.model.qwenvl_with_expert.config.attention_implementation,
         "attn_fp32": getattr(policy.model.qwenvl_with_expert.config, "attention_fp32", None),
         "num_steps": args.num_steps,
+        "dtype": str(next(policy.parameters()).dtype),
+        "gpu_preprocess": getattr(args, "gpu_preprocess", False),
         "iters": n,
         "total_ms": total,
         "preprocess_ms": sum(lat_pre) / n * 1e3,
@@ -419,6 +428,10 @@ def main():
     p.add_argument("--compile-mode", default="default",
                    choices=["default", "max-autotune-no-cudagraphs"],
                    help="inductor mode for --compile")
+    p.add_argument("--dtype", default=None, choices=["float16", "bfloat16", "float32"],
+                   help="cast the whole model to this dtype after load (default: keep ckpt dtype)")
+    p.add_argument("--gpu-preprocess", action="store_true",
+                   help="run image preprocessing on GPU (batched single processor call)")
     p.add_argument("--num-steps", type=int, default=10)
     p.add_argument("--iters", type=int, default=20)
     p.add_argument("--warmup", type=int, default=3)

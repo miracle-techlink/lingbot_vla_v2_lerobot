@@ -88,6 +88,7 @@ class FeatureTransform:
         use_future_image=False,
         robot_config=None,
         norm_stats=None,
+        preprocess_device=None,
     ):
         # ``robot_config`` / ``norm_stats`` accept the already-parsed contents so a
         # serialized checkpoint can ship self-contained configs (no absolute paths).
@@ -122,6 +123,16 @@ class FeatureTransform:
 
         self.chunk_size = chunk_size
         self.return_item_before_padding = return_item_before_padding
+
+        # When set, camera images are uploaded to this device and processed by the
+        # HF image processor in a single batched call (see prepare_images). None
+        # keeps the original per-camera CPU path.
+        self.preprocess_device = preprocess_device
+        # Episode-level tokenizer cache: the task string is constant within an
+        # episode, so lang_tokens/lang_masks are computed once and reused. Bounded
+        # (few distinct tasks per deployment) and keyed by the full prompt string.
+        self._lang_token_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._lang_token_cache_size = 16
 
         # disabled_image_features: keep the image features or not when getting lerobot item
         self.disabled_image_features = disabled_image_features
@@ -498,6 +509,7 @@ class FeatureTransform:
                 use_depth_align=self.use_depth_align,
                 return_image_grid_thw=return_image_grid_thw,
                 return_augment_params=True,
+                preprocess_device=self.preprocess_device,
             )
             if self.use_future_image and len(batch_dict.get("future_image", {})) > 0:
                 future_obs = {**batch_dict, "image": batch_dict["future_image"]}
@@ -525,9 +537,18 @@ class FeatureTransform:
         )
         batch_dict["image_token_count"] = image_token_count
 
-        lang_tokens, lang_masks = prepare_language(
-            self.model_config, self.tokenizer, batch_dict
-        )  # bs, seq_len
+        prompt_key = batch_dict["prompt"][0] if batch_dict.get("prompt") else None
+        cached_lang = self._lang_token_cache.get(prompt_key) if prompt_key is not None else None
+        if cached_lang is not None:
+            lang_tokens, lang_masks = cached_lang
+        else:
+            lang_tokens, lang_masks = prepare_language(
+                self.model_config, self.tokenizer, batch_dict
+            )  # bs, seq_len
+            if prompt_key is not None:
+                if len(self._lang_token_cache) >= self._lang_token_cache_size:
+                    self._lang_token_cache.clear()
+                self._lang_token_cache[prompt_key] = (lang_tokens, lang_masks)
         action_is_pad = batch_dict["action_is_pad"]
 
         state_joint_mask = batch_dict["state_joint_mask"]
