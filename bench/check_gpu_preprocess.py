@@ -10,6 +10,7 @@ default per-camera CPU path vs batched on-GPU path — and reports:
 Usage:
   python check_gpu_preprocess.py --ckpt /path/to/ckpt [--iters 20]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -71,8 +72,11 @@ def main():
 
     # action parity with fixed noise
     noise = torch.randn(
-        1, policy.config.n_action_steps, policy.config.max_action_dim,
-        device="cuda", dtype=next(policy.parameters()).dtype,
+        1,
+        policy.config.n_action_steps,
+        policy.config.max_action_dim,
+        device="cuda",
+        dtype=next(policy.parameters()).dtype,
     )
     with torch.no_grad():
         a_cpu = policy.predict_action_chunk(batch_cpu, noise=noise.clone())

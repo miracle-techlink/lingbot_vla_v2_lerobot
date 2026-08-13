@@ -21,6 +21,7 @@ Usage:
       --save-ref ref.npz [reference flags]
   python bench_libero_fidelity.py --ckpt CKPT --hdf5 ... --ref ref.npz [arm flags]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -101,13 +102,21 @@ def main():
     p.add_argument("--moe-dense-max-tokens", type=int, default=None)
     p.add_argument("--compile", action="store_true")
     p.add_argument("--compile-mode", default="default")
-    p.add_argument("--compile-prefix", action="store_true",
-                   help="also compile embed_prefix + prefix KV fill (C3)")
+    p.add_argument(
+        "--compile-prefix", action="store_true", help="also compile embed_prefix + prefix KV fill (C3)"
+    )
     p.add_argument("--num-steps", type=int, default=10)
-    p.add_argument("--dtype", default=None, choices=["float16", "bfloat16", "float32"],
-                   help="cast the whole model to this dtype after load")
-    p.add_argument("--gpu-preprocess", action="store_true",
-                   help="run image preprocessing on GPU (batched single processor call)")
+    p.add_argument(
+        "--dtype",
+        default=None,
+        choices=["float16", "bfloat16", "float32"],
+        help="cast the whole model to this dtype after load",
+    )
+    p.add_argument(
+        "--gpu-preprocess",
+        action="store_true",
+        help="run image preprocessing on GPU (batched single processor call)",
+    )
     p.add_argument("--noise-seed", type=int, default=1234)
     args = p.parse_args()
 
@@ -131,6 +140,7 @@ def main():
         if args.compile_prefix:
             policy.model._use_compile_prefix = True
         import torch._dynamo as _dynamo
+
         _dynamo.config.recompile_limit = 64
     policy.config.num_steps = args.num_steps
     if args.gpu_preprocess:
@@ -166,8 +176,12 @@ def main():
         lat = []
         for it in range(n):
             noise = torch.randn(
-                1, policy.config.n_action_steps, policy.config.max_action_dim,
-                device="cuda", dtype=next(policy.parameters()).dtype, generator=g,
+                1,
+                policy.config.n_action_steps,
+                policy.config.max_action_dim,
+                device="cuda",
+                dtype=next(policy.parameters()).dtype,
+                generator=g,
             )
             with torch.no_grad():
                 torch.cuda.synchronize()
@@ -175,12 +189,12 @@ def main():
                 act = policy.predict_action_chunk(batch, noise=noise.clone())
                 torch.cuda.synchronize()
                 lat.append(time.perf_counter() - t0)
-        keep = lat[args.warmup:] if si == 0 else lat
+        keep = lat[args.warmup :] if si == 0 else lat
         lat_model.extend(keep)
         lat_pre.append(t_pre)
         actions_out.append(act.float().cpu().numpy()[0])
         if si % 4 == 0:
-            print(f"frame {si}/{len(samples)} model={np.mean(lat)*1e3:.1f}ms", flush=True)
+            print(f"frame {si}/{len(samples)} model={np.mean(lat) * 1e3:.1f}ms", flush=True)
 
     actions = np.stack(actions_out)
     out = {

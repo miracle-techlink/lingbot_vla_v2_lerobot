@@ -17,6 +17,7 @@ Probe design that does NOT disturb dynamo:
 
 Usage: python bench_compile_profile.py --ckpt <ckpt> [--iters 3]
 """
+
 import argparse
 import collections
 import json
@@ -29,6 +30,7 @@ import torch
 # handle_kv_cache specializes on layer_idx (36 layers) — the default recompile
 # limit (8) can fall back to eager mid-run; raise it before any compile.
 import torch._dynamo
+
 torch._dynamo.config.recompile_limit = 64
 try:
     torch._dynamo.config.accumulated_recompile_limit = 512
@@ -43,6 +45,7 @@ args = p.parse_args()
 
 from lerobot.policies.factory import make_pre_post_processors
 from lerobot.policies.lingbot_vla_v2.modeling_lingbot_vla_v2 import LingbotVLAV2Policy
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bench_lingbot_v2 import make_obs
 
@@ -99,22 +102,30 @@ T = Timers()
 
 # vision (embed_prefix path only — never inside compiled code)
 orig_gif = core.get_image_features
+
+
 def gif_timed(*a, **kw):
     T["vision"].start()
     try:
         return orig_gif(*a, **kw)
     finally:
         T["vision"].stop()
+
+
 core.get_image_features = gif_timed
 
 # embed_prefix total (eager, once per inference)
 orig_ep = fm.embed_prefix
+
+
 def ep_timed(*a, **kw):
     T["embed_prefix"].start()
     try:
         return orig_ep(*a, **kw)
     finally:
         T["embed_prefix"].stop()
+
+
 fm.embed_prefix = ep_timed
 
 # NOTE: no wrapper on core.forward — any Python frame there is traced by
@@ -130,12 +141,16 @@ compiled_pv = torch.compile(
     dynamic=False,
     options={"triton.cudagraphs": False},
 )
+
+
 def pv_timed(*a, **kw):
     T["denoise_step"].start()
     try:
         return compiled_pv(*a, **kw)
     finally:
         T["denoise_step"].stop()
+
+
 fm._compiled_predict_velocity = pv_timed
 
 print("warming up (compile) ...", flush=True)
@@ -176,11 +191,11 @@ trace_path = os.environ.get("TRACE_OUT", "/tmp/compile_profile.json")
 prof.export_chrome_trace(trace_path)
 
 evs = json.load(open(trace_path))["traceEvents"]
-kernels = [(e["name"], e["dur"]) for e in evs
-           if e.get("ph") == "X" and e.get("cat") == "kernel"]
+kernels = [(e["name"], e["dur"]) for e in evs if e.get("ph") == "X" and e.get("cat") == "kernel"]
 
 MOE_PAT = ("_moe_", "moe_", "grouped_gemm")
 ATTN_PAT = ("flash_fwd", "flash_attn", "memory_efficient", "fmha", "scaled_dot_product")
+
 
 def classify(kname):
     kl = kname.lower()
@@ -189,6 +204,7 @@ def classify(kname):
     if any(p in kl for p in ATTN_PAT):
         return "attention"
     return "other"
+
 
 n_inf = args.iters
 out = {
@@ -202,7 +218,9 @@ for k in stage_ms:
 out["denoise_loop_ms"] = stage_ms.get("denoise_step", 0.0)
 # prefix fill is not directly probeable without disturbing dynamo; derive it:
 # total = embed_prefix + prefix_fwd + denoise_loop + postprocess(~0.7ms)
-out["prefix_fwd_derived_ms"] = clean_total_ms - stage_ms.get("embed_prefix", 0.0) - stage_ms.get("denoise_step", 0.0)
+out["prefix_fwd_derived_ms"] = (
+    clean_total_ms - stage_ms.get("embed_prefix", 0.0) - stage_ms.get("denoise_step", 0.0)
+)
 for cls in ("moe", "attention", "other"):
     out[f"kernels_{cls}_ms"] = sum(d for n, d in kernels if classify(n) == cls) / n_inf / 1e3
 out["kernels_total_ms"] = sum(d for _, d in kernels) / n_inf / 1e3

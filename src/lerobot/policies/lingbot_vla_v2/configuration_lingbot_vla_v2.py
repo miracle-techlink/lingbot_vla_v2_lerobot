@@ -258,6 +258,7 @@ class LingbotVLAV2Config(PreTrainedConfig):
     # the [B, H, L, L] score matrix and is only kept for debugging; "fa2" needs the
     # flash-attn package; "flex"/"flex_cached" use torch flex-attention BlockMasks.
     attention_implementation: str = "sdpa"
+    # Same implementation choices, applied to the vision tower (ViT) attention.
     vit_attn_implementation: str = "sdpa"
     # Upcast attention Q/K/V (and the KV cache) to fp32 — the original upstream
     # parity path. False (default) runs attention in the model dtype (bf16 tensor

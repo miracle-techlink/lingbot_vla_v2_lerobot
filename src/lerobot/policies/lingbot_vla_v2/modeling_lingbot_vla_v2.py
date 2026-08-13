@@ -550,9 +550,7 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
                 out_emb = models[i].layers[layer_idx](
                     hidden_states, att_output, start, end, output_atten=True
                 )
-                out_emb = self._apply_deepstack(
-                    out_emb, layer_idx, visual_pos_masks, deepstack_visual_embeds
-                )
+                out_emb = self._apply_deepstack(out_emb, layer_idx, visual_pos_masks, deepstack_visual_embeds)
             outputs_embeds.append(out_emb)
             start = end
         return outputs_embeds, router_logits_list, block_mask, past_key_values
@@ -1337,11 +1335,7 @@ class FlowMatchingV2(FlowMatchingV1):
             )
             position_ids = full_position_ids[:, :, -suffix_len:]
             core = self.qwenvl_with_expert
-            rep = (
-                suffix_embs.float()
-                if getattr(core.config, "attention_fp32", False)
-                else suffix_embs
-            )
+            rep = suffix_embs.float() if getattr(core.config, "attention_fp32", False) else suffix_embs
             position_embeddings = core.qwenvl.model.language_model.rotary_emb(rep, position_ids)
             cache["full_att_2d_masks"] = full_att_2d_masks
             cache["position_ids"] = position_ids

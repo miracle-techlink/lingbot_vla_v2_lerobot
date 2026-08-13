@@ -6,6 +6,7 @@ Usage:
   a100.py put <local> <remote>         # sftp upload (file or dir, recursive)
   a100.py get <remote> <local>         # sftp download (file or dir, recursive)
 """
+
 import os
 import stat
 import sys

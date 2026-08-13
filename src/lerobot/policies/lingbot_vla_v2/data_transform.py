@@ -351,8 +351,10 @@ def prepare_images_on_device(image_processor, images: dict[str, Tensor], device)
         )
         if (resized_height, resized_width) != (height, width):
             x = tvF.resize(
-                x, [resized_height, resized_width],
-                interpolation=tvF.InterpolationMode.BICUBIC, antialias=True,
+                x,
+                [resized_height, resized_width],
+                interpolation=tvF.InterpolationMode.BICUBIC,
+                antialias=True,
             )
         x = (x - mean_t) / std_t
 
@@ -364,9 +366,16 @@ def prepare_images_on_device(image_processor, images: dict[str, Tensor], device)
         grid_t = grid_t // temporal_patch_size
         grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
         patches = patches.view(
-            batch_size, grid_t, temporal_patch_size, channel,
-            grid_h // merge_size, merge_size, patch_size,
-            grid_w // merge_size, merge_size, patch_size,
+            batch_size,
+            grid_t,
+            temporal_patch_size,
+            channel,
+            grid_h // merge_size,
+            merge_size,
+            patch_size,
+            grid_w // merge_size,
+            merge_size,
+            patch_size,
         )
         patches = patches.permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
         flatten_patches = patches.reshape(
@@ -422,10 +431,7 @@ def prepare_images(
         pil_image_dict = {}
 
     gpu_fast_path = (
-        image_processor is not None
-        and preprocess_device is not None
-        and not train
-        and not use_depth_align
+        image_processor is not None and preprocess_device is not None and not train and not use_depth_align
     )
 
     if gpu_fast_path:

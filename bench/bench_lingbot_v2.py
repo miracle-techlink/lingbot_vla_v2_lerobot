@@ -14,6 +14,7 @@ Usage:
   python bench_lingbot_v2.py train --ckpt /path/to/ckpt [--batch 8] [--iters 10]
   python bench_lingbot_v2.py check-flex --ckpt /path/to/ckpt   # flex_cached vs sdpa parity
 """
+
 from __future__ import annotations
 
 import argparse
@@ -257,6 +258,7 @@ def bench_infer(args):
         # handle_kv_cache specializes on layer_idx (36 layers); the default
         # recompile limit (8) can fall back to eager mid-graph
         import torch._dynamo as _dynamo
+
         _dynamo.config.recompile_limit = 64
     preprocessor, _ = make_pre_post_processors(
         policy.config,
@@ -387,12 +389,18 @@ def check_flex(args):
     against sdpa+bf16 and flex_cached+bf16 — same weights, same noise."""
     policy = load_policy(args)
     preprocessor, _ = make_pre_post_processors(
-        policy.config, pretrained_path=args.ckpt,
+        policy.config,
+        pretrained_path=args.ckpt,
         preprocessor_overrides={"device_processor": {"device": "cuda"}},
     )
     batch = preprocessor(make_obs(args.ckpt))
-    noise = torch.randn(1, policy.config.n_action_steps, policy.config.max_action_dim,
-                        device="cuda", dtype=next(policy.parameters()).dtype)
+    noise = torch.randn(
+        1,
+        policy.config.n_action_steps,
+        policy.config.max_action_dim,
+        device="cuda",
+        dtype=next(policy.parameters()).dtype,
+    )
 
     def run(attn, fp32):
         core = policy.model.qwenvl_with_expert
@@ -409,7 +417,9 @@ def check_flex(args):
             a = run(attn, fp32)
             diff = (ref - a).abs().max().item()
             out[f"{attn}+{'fp32' if fp32 else 'bf16'}"] = {
-                "max_abs_diff": diff, "rel": diff / max(ref.abs().max().item(), 1e-9)}
+                "max_abs_diff": diff,
+                "rel": diff / max(ref.abs().max().item(), 1e-9),
+            }
         except Exception as exc:
             out[f"{attn}+{'fp32' if fp32 else 'bf16'}"] = f"FAILED: {type(exc).__name__}: {exc}"
     print(json.dumps(out, indent=2))
@@ -421,22 +431,42 @@ def main():
     p.add_argument("--ckpt", required=True)
     p.add_argument("--attn", default=None, help="override attention_implementation")
     p.add_argument("--vit-attn", default=None)
-    p.add_argument("--attn-fp32", action=argparse.BooleanOptionalAction, default=None,
-                   help="force fp32 attention upcast (parity path) on/off")
+    p.add_argument(
+        "--attn-fp32",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="force fp32 attention upcast (parity path) on/off",
+    )
     p.add_argument("--grad-ckpt", action="store_true", help="enable gradient checkpointing")
-    p.add_argument("--moe-dense-max-tokens", type=int, default=None,
-                   help="override moe_dense_max_tokens on all MoE blocks (0 = disable dense path)")
-    p.add_argument("--compile", action="store_true",
-                   help="torch.compile predict_velocity (inductor, cudagraphs off)")
-    p.add_argument("--compile-mode", default="default",
-                   choices=["default", "max-autotune-no-cudagraphs"],
-                   help="inductor mode for --compile")
-    p.add_argument("--compile-prefix", action="store_true",
-                   help="also compile embed_prefix + prefix KV fill (C3)")
-    p.add_argument("--dtype", default=None, choices=["float16", "bfloat16", "float32"],
-                   help="cast the whole model to this dtype after load (default: keep ckpt dtype)")
-    p.add_argument("--gpu-preprocess", action="store_true",
-                   help="run image preprocessing on GPU (batched single processor call)")
+    p.add_argument(
+        "--moe-dense-max-tokens",
+        type=int,
+        default=None,
+        help="override moe_dense_max_tokens on all MoE blocks (0 = disable dense path)",
+    )
+    p.add_argument(
+        "--compile", action="store_true", help="torch.compile predict_velocity (inductor, cudagraphs off)"
+    )
+    p.add_argument(
+        "--compile-mode",
+        default="default",
+        choices=["default", "max-autotune-no-cudagraphs"],
+        help="inductor mode for --compile",
+    )
+    p.add_argument(
+        "--compile-prefix", action="store_true", help="also compile embed_prefix + prefix KV fill (C3)"
+    )
+    p.add_argument(
+        "--dtype",
+        default=None,
+        choices=["float16", "bfloat16", "float32"],
+        help="cast the whole model to this dtype after load (default: keep ckpt dtype)",
+    )
+    p.add_argument(
+        "--gpu-preprocess",
+        action="store_true",
+        help="run image preprocessing on GPU (batched single processor call)",
+    )
     p.add_argument("--num-steps", type=int, default=10)
     p.add_argument("--iters", type=int, default=20)
     p.add_argument("--warmup", type=int, default=3)

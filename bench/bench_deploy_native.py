@@ -12,6 +12,7 @@ and, in eager mode, model-internal probes:
 Usage (on A100, conda env lvla-native):
   CUDA_VISIBLE_DEVICES=4 python bench_deploy_native.py [--compile] [--iters 20]
 """
+
 import argparse
 import json
 import os
@@ -50,6 +51,7 @@ if args.num_steps:
     server.vla.config.num_steps = args.num_steps
     server.vla.model.config.num_steps = args.num_steps
 
+
 # ---------------- stage timers (host wall around the three deploy stages) ----
 class Wall:
     def __init__(self):
@@ -64,15 +66,21 @@ class Wall:
 pre_t, mdl_t, un_t = Wall(), Wall(), Wall()
 
 orig_prep = server._prepare_model_input
+
+
 def prep(obs):
     t0 = time.perf_counter()
     r = orig_prep(obs)
     pre_t.t += time.perf_counter() - t0
     pre_t.n += 1
     return r
+
+
 server._prepare_model_input = prep
 
 orig_sab = server.vla.sample_actions_batch
+
+
 def sab(*a, **kw):
     torch.cuda.synchronize()
     t0 = time.perf_counter()
@@ -81,16 +89,23 @@ def sab(*a, **kw):
     mdl_t.t += time.perf_counter() - t0
     mdl_t.n += 1
     return r
+
+
 server.vla.sample_actions_batch = sab
 
 orig_un = server._unapply_batched_actions
+
+
 def un(*a, **kw):
     t0 = time.perf_counter()
     r = orig_un(*a, **kw)
     un_t.t += time.perf_counter() - t0
     un_t.n += 1
     return r
+
+
 server._unapply_batched_actions = un
+
 
 # ---------------- model-internal probes (eager only; they break dynamo) ------
 class CudaTimer:
@@ -160,12 +175,14 @@ if not args.compile:
     core.forward = forward_probe
 
     attn = core.attention_interface
+
     def attn_probe(*a, **kw):
         T["attention"].start()
         try:
             return attn(*a, **kw)
         finally:
             T["attention"].stop()
+
     core.attention_interface = attn_probe
     patches.append((core, "attention_interface", attn))
 
@@ -177,17 +194,20 @@ if not args.compile:
     from lingbotvla.models.vla.lingbot_vla.qwen2_action_expert import Qwen2TokenMoeBlock
 
     orig_moe = Qwen2TokenMoeBlock.forward
+
     def moe_probe(self, *a, **kw):
         T["moe"].start()
         try:
             return orig_moe(self, *a, **kw)
         finally:
             T["moe"].stop()
+
     Qwen2TokenMoeBlock.forward = moe_probe
     patches.append((Qwen2TokenMoeBlock, "forward", orig_moe))
 
 # ---------------- observation (robotwin: 3 cams + 14-dim state + prompt) ----
 rng = np.random.default_rng(0)
+
 
 def make_obs():
     return {
@@ -208,9 +228,12 @@ for i in range(args.warmup + args.iters):
     torch.cuda.synchronize()
     dt = time.perf_counter() - t0
     if i == args.warmup - 1:
-        pre_t.reset(); mdl_t.reset(); un_t.reset()
+        pre_t.reset()
+        mdl_t.reset()
+        un_t.reset()
         for t in T.values():
-            t.pairs.clear(); t.calls = 0
+            t.pairs.clear()
+            t.calls = 0
     if i >= args.warmup:
         infer_times.append(dt)
 

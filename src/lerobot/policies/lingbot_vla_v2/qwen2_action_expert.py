@@ -209,22 +209,20 @@ class Qwen2FusedExperts(nn.Module):
         Cached only when gradients are disabled (inference); under autograd the
         repack is rebuilt each call so gradients flow into the Parameters.
         """
-        E, I, H = self.gate_proj.shape
+        E, inter_dim, H = self.gate_proj.shape
         if torch.is_grad_enabled():
-            w1 = torch.cat([self.gate_proj, self.up_proj], dim=1).reshape(E * 2 * I, H).t()
-            w2 = self.down_proj.permute(0, 2, 1).reshape(E * I, H)
+            w1 = torch.cat([self.gate_proj, self.up_proj], dim=1).reshape(E * 2 * inter_dim, H).t()
+            w2 = self.down_proj.permute(0, 2, 1).reshape(E * inter_dim, H)
             return w1, w2
         if self._dense_w1_cache is None:
             with torch.no_grad():
                 self._dense_w1_cache = (
                     torch.cat([self.gate_proj, self.up_proj], dim=1)
-                    .reshape(E * 2 * I, H)
+                    .reshape(E * 2 * inter_dim, H)
                     .t()
                     .contiguous()
                 )
-                self._dense_w2_cache = (
-                    self.down_proj.permute(0, 2, 1).reshape(E * I, H).contiguous()
-                )
+                self._dense_w2_cache = self.down_proj.permute(0, 2, 1).reshape(E * inter_dim, H).contiguous()
         return self._dense_w1_cache, self._dense_w2_cache
 
     def _dense_forward(self, routing_weights, selected_experts, hidden_states):
@@ -244,11 +242,11 @@ class Qwen2FusedExperts(nn.Module):
         accumulation; cast back to the input dtype at the end.
         """
         T, H = hidden_states.shape
-        E, I = self.gate_proj.shape[0], self.gate_proj.shape[1]
+        E, inter_dim = self.gate_proj.shape[0], self.gate_proj.shape[1]
         w1, w2 = self._dense_packed_weights()  # [H, E*2I], [E*I, H]
 
-        gu = (hidden_states @ w1).view(T, E, 2 * I)
-        inter = F.silu(gu[..., :I]) * gu[..., I:]  # [T, E, I]
+        gu = (hidden_states @ w1).view(T, E, 2 * inter_dim)
+        inter = F.silu(gu[..., :inter_dim]) * gu[..., inter_dim:]  # [T, E, I]
 
         # One-hot the top-k routing weights back to a dense [T, E] table (0 for
         # unselected experts) and fold them into the intermediate activations.
@@ -256,7 +254,7 @@ class Qwen2FusedExperts(nn.Module):
         w.scatter_(1, selected_experts, routing_weights.to(torch.float32))
         inter = inter * w.unsqueeze(-1).to(inter.dtype)
 
-        return (inter.reshape(T, E * I) @ w2).to(hidden_states.dtype)
+        return (inter.reshape(T, E * inter_dim) @ w2).to(hidden_states.dtype)
 
     def forward(self, module, num_experts, routing_weights, selected_experts, hidden_states):
         """Run the fused experts with FSDP2-managed weights.
@@ -270,7 +268,7 @@ class Qwen2FusedExperts(nn.Module):
         # 1) dense two-GEMM path for small token counts (flow-matching denoise:
         # T ~= 51). Pure torch, static shapes, no graph breaks under torch.compile.
         dense_max_tokens = getattr(module, "_dense_max_tokens", 512)
-        if 0 < dense_max_tokens and hidden_states.shape[0] <= dense_max_tokens:
+        if dense_max_tokens > 0 and hidden_states.shape[0] <= dense_max_tokens:
             return self._dense_forward(routing_weights, selected_experts, hidden_states)
 
         # 2) vendor triton kernel, if the external package is installed.
@@ -463,7 +461,7 @@ class Qwen2TokenMoeBlock(nn.Module):
 
         # Expert computation: dense two-GEMM (small T) / vendor triton / grouped eager
         if self._moe_implementation == "fused":
-            use_dense = 0 < self._dense_max_tokens and hidden_flat.shape[0] <= self._dense_max_tokens
+            use_dense = self._dense_max_tokens > 0 and hidden_flat.shape[0] <= self._dense_max_tokens
             use_robby_moe = (
                 not use_dense
                 and robby_moe_forward is not None
