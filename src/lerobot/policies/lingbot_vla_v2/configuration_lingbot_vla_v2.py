@@ -276,6 +276,13 @@ class LingbotVLAV2Config(PreTrainedConfig):
     # "max-autotune-no-cudagraphs" (slow first compile, GEMM autotuning; CUDA
     # graphs stay disabled either way).
     compile_predict_velocity_mode: str = "default"
+    # Also compile the prefix path (embed_prefix: vision tower + language/state
+    # embedding + mrope position ids, then the 36-layer prefix KV fill) with the
+    # same inductor mode. Requires compile_predict_velocity=True to take effect
+    # (the flag only matters when the denoise loop is compiled). The prefix runs
+    # once per action chunk; compiling it removes the per-layer launch gaps that
+    # dominate its eager wall time.
+    compile_prefix: bool = False
     # Compute/log the MoE monitoring metrics (per-layer MaxVio/entropy/dead-expert,
     # plus the per-metric .item() syncs) once every N training steps. 1 = every
     # step (original behavior).

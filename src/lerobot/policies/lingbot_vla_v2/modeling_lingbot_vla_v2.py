@@ -1116,6 +1116,38 @@ class FlowMatchingV2(FlowMatchingV1):
             current_video_preds,
         )
 
+    def _embed_and_fill_prefix(self, images, img_masks, lang_tokens, lang_masks, image_grid_thw):
+        """Prefix half of sample_actions as one compilable unit: embed_prefix
+        (vision tower + language embedding + mrope position ids) followed by the
+        36-layer KV fill. Returns exactly what the denoise loop consumes."""
+        (
+            prefix_embs,
+            prefix_pad_masks,
+            prefix_att_masks,
+            prefix_position_ids,
+            visual_pos_masks,
+            deepstack_visual_embeds,
+        ) = self.embed_prefix(
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            image_grid_thw=image_grid_thw,
+        )
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        _, past_key_values, _ = self.qwenvl_with_expert.forward(
+            attention_mask=prefix_att_2d_masks,
+            position_ids=prefix_position_ids,
+            vlm_position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=self.config.use_cache,
+            fill_kv_cache=True,
+            visual_pos_masks=visual_pos_masks,
+            deepstack_visual_embeds=deepstack_visual_embeds,
+        )
+        return prefix_pad_masks, prefix_position_ids, past_key_values
+
     def sample_actions(
         self,
         images,
@@ -1139,33 +1171,62 @@ class FlowMatchingV2(FlowMatchingV1):
             )
             noise = torch.randn(actions_shape, device=device, dtype=dtype)
 
-        (
-            prefix_embs,
-            prefix_pad_masks,
-            prefix_att_masks,
-            prefix_position_ids,
-            visual_pos_masks,
-            deepstack_visual_embeds,
-        ) = self.embed_prefix(
-            images,
-            img_masks,
-            lang_tokens,
-            lang_masks,
-            image_grid_thw=image_grid_thw,
-        )
-        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        if getattr(self, "_use_compile_prefix", False):
+            prefix_fn = getattr(self, "_compiled_prefix", None)
+            if prefix_fn is None:
+                mode = getattr(self, "_compile_predict_velocity_mode", "default")
+                if mode == "default":
+                    prefix_fn = torch.compile(
+                        self._embed_and_fill_prefix,
+                        fullgraph=False,
+                        dynamic=False,
+                        options={"triton.cudagraphs": False},
+                    )
+                else:
+                    # torch.compile forbids mode+options together; the
+                    # *-no-cudagraphs modes already keep CUDA graphs off.
+                    prefix_fn = torch.compile(
+                        self._embed_and_fill_prefix,
+                        fullgraph=False,
+                        dynamic=False,
+                        mode=mode,
+                    )
+                self._compiled_prefix = prefix_fn
+            prefix_pad_masks, prefix_position_ids, past_key_values = prefix_fn(
+                images,
+                img_masks,
+                lang_tokens,
+                lang_masks,
+                image_grid_thw,
+            )
+        else:
+            (
+                prefix_embs,
+                prefix_pad_masks,
+                prefix_att_masks,
+                prefix_position_ids,
+                visual_pos_masks,
+                deepstack_visual_embeds,
+            ) = self.embed_prefix(
+                images,
+                img_masks,
+                lang_tokens,
+                lang_masks,
+                image_grid_thw=image_grid_thw,
+            )
+            prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
 
-        _, past_key_values, _ = self.qwenvl_with_expert.forward(
-            attention_mask=prefix_att_2d_masks,
-            position_ids=prefix_position_ids,
-            vlm_position_ids=prefix_position_ids,
-            past_key_values=None,
-            inputs_embeds=[prefix_embs, None],
-            use_cache=self.config.use_cache,
-            fill_kv_cache=True,
-            visual_pos_masks=visual_pos_masks,
-            deepstack_visual_embeds=deepstack_visual_embeds,
-        )
+            _, past_key_values, _ = self.qwenvl_with_expert.forward(
+                attention_mask=prefix_att_2d_masks,
+                position_ids=prefix_position_ids,
+                vlm_position_ids=prefix_position_ids,
+                past_key_values=None,
+                inputs_embeds=[prefix_embs, None],
+                use_cache=self.config.use_cache,
+                fill_kv_cache=True,
+                visual_pos_masks=visual_pos_masks,
+                deepstack_visual_embeds=deepstack_visual_embeds,
+            )
 
         dt = torch.tensor(-1.0 / self.config.num_steps, dtype=dtype, device=device)
         x_t = noise
@@ -1503,6 +1564,8 @@ class LingbotVLAV2Policy(PreTrainedPolicy):
             self.model._compile_predict_velocity_mode = getattr(
                 self.config, "compile_predict_velocity_mode", "default"
             )
+            if getattr(self.config, "compile_prefix", False):
+                self.model._use_compile_prefix = True
 
         self.reset()
         torch.set_float32_matmul_precision("high")

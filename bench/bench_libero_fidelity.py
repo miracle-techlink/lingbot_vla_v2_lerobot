@@ -101,6 +101,8 @@ def main():
     p.add_argument("--moe-dense-max-tokens", type=int, default=None)
     p.add_argument("--compile", action="store_true")
     p.add_argument("--compile-mode", default="default")
+    p.add_argument("--compile-prefix", action="store_true",
+                   help="also compile embed_prefix + prefix KV fill (C3)")
     p.add_argument("--num-steps", type=int, default=10)
     p.add_argument("--dtype", default=None, choices=["float16", "bfloat16", "float32"],
                    help="cast the whole model to this dtype after load")
@@ -126,6 +128,8 @@ def main():
     if args.compile:
         policy.model._use_compile_predict_velocity = True
         policy.model._compile_predict_velocity_mode = args.compile_mode
+        if args.compile_prefix:
+            policy.model._use_compile_prefix = True
         import torch._dynamo as _dynamo
         _dynamo.config.recompile_limit = 64
     policy.config.num_steps = args.num_steps

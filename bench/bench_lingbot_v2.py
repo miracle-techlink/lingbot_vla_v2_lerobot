@@ -252,6 +252,8 @@ def bench_infer(args):
     if getattr(args, "compile", False):
         policy.model._use_compile_predict_velocity = True
         policy.model._compile_predict_velocity_mode = args.compile_mode
+        if getattr(args, "compile_prefix", False):
+            policy.model._use_compile_prefix = True
         # handle_kv_cache specializes on layer_idx (36 layers); the default
         # recompile limit (8) can fall back to eager mid-graph
         import torch._dynamo as _dynamo
@@ -296,6 +298,7 @@ def bench_infer(args):
         "num_steps": args.num_steps,
         "dtype": str(next(policy.parameters()).dtype),
         "gpu_preprocess": getattr(args, "gpu_preprocess", False),
+        "compile_prefix": getattr(args, "compile_prefix", False),
         "iters": n,
         "total_ms": total,
         "preprocess_ms": sum(lat_pre) / n * 1e3,
@@ -428,6 +431,8 @@ def main():
     p.add_argument("--compile-mode", default="default",
                    choices=["default", "max-autotune-no-cudagraphs"],
                    help="inductor mode for --compile")
+    p.add_argument("--compile-prefix", action="store_true",
+                   help="also compile embed_prefix + prefix KV fill (C3)")
     p.add_argument("--dtype", default=None, choices=["float16", "bfloat16", "float32"],
                    help="cast the whole model to this dtype after load (default: keep ckpt dtype)")
     p.add_argument("--gpu-preprocess", action="store_true",
