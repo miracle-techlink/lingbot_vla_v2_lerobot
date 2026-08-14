@@ -121,7 +121,7 @@ class LingbotVLAV2FeatureTransformStep(ProcessorStep):
         if not _transformers_available:
             raise ImportError(
                 "transformers is required for LingbotVLAV2FeatureTransformStep. "
-                "Install it with `pip install 'lerobot[lingbot_vla2]'`."
+                "Install it with `pip install 'lerobot[lingbot-v2]'`."
             )
         from .feature_transform import FeatureTransform
         from .qwen3vl_in_vla import apply_lingbot_qwen3_vl_patch

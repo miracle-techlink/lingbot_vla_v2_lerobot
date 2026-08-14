@@ -13,7 +13,7 @@ Use this policy through the standard LeRobot interfaces: `lerobot-train`,
 Install LeRobot with the optional LingBot-VLA v2 dependencies:
 
 ```bash
-pip install -e ".[training,lingbot_vla2]"
+pip install -e ".[training,lingbot-v2]"
 ```
 
 The default config expects a Qwen3-VL processor/tokenizer and a LingBot-VLA v2 checkpoint:
