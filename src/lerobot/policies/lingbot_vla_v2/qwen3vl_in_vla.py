@@ -281,7 +281,12 @@ def preprcess_grid_thw(self, grid_thw: torch.Tensor):
     cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
     split_sizes = (grid_thw.prod(-1) // self.spatial_merge_size**2).tolist()
     max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
-    return None, position_embeddings, cu_seqlens, split_sizes, max_seqlen
+    # Also materialize pos_embeds here so callers that cache the return values
+    # (precompute_grid_thw=True) get a complete set — otherwise pos_embeds=None
+    # would retrigger this host-syncing function on every forward even when the
+    # rest is cached, which also breaks CUDA graph capture.
+    pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
+    return pos_embeds, position_embeddings, cu_seqlens, split_sizes, max_seqlen
 
 
 def forward_without_grid_thw(
