@@ -1233,7 +1233,18 @@ class FlowMatchingV2(FlowMatchingV1):
 
         dt = torch.tensor(-1.0 / self.config.num_steps, dtype=dtype, device=device)
         x_t = noise
+        # Precompute the timestep schedule without any host read-back: a
+        # `while time >= -dt / 2` condition forces a GPU->CPU sync every
+        # denoise step, draining the pipeline and exposing host launch
+        # overhead. The values below come from the same iterative `time + dt`
+        # accumulation, so the schedule is bit-identical to the while form
+        # (exactly num_steps entries; accumulation error stays far below the
+        # old -dt/2 threshold).
         time = torch.tensor(1.0, dtype=dtype, device=device)
+        time_values = []
+        for _ in range(self.config.num_steps):
+            time_values.append(time)
+            time = time + dt
         count = 0
         predict_velocity_fn = self.predict_velocity
         if getattr(self, "_use_compile_predict_velocity", False):
@@ -1263,9 +1274,9 @@ class FlowMatchingV2(FlowMatchingV1):
         # for the remaining denoise steps — they depend on the prefix masks only,
         # not on x_t or the timestep.
         denoise_cache: dict = {}
-        while time >= -dt / 2:
+        for step_time in time_values:
             count += 1
-            expanded_time = time.expand(bsize)
+            expanded_time = step_time.expand(bsize)
             v_t = predict_velocity_fn(
                 state,
                 prefix_pad_masks,
@@ -1277,7 +1288,6 @@ class FlowMatchingV2(FlowMatchingV1):
             )
 
             x_t += dt * v_t
-            time += dt
         logger.debug("Denoised %s steps", count)
         return x_t
 
