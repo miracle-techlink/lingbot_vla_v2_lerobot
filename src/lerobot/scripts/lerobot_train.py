@@ -152,7 +152,7 @@ def update_policy(
         if sample_weights is not None:
             # Use per-sample loss for weighted training
             # Note: Policies supporting sample weighting must implement forward(batch, reduction="none")
-            per_sample_loss, output_dict = policy.forward(batch, reduction="none")
+            per_sample_loss, output_dict = policy(batch, reduction="none")
 
             # Weighted loss: each sample's contribution is scaled by its weight.
             # We divide by weight sum (not batch size) so that if some weights are zero,
@@ -167,7 +167,7 @@ def update_policy(
             for key, value in weight_stats.items():
                 output_dict[f"sample_weight_{key}"] = value
         else:
-            loss, output_dict = policy.forward(batch)
+            loss, output_dict = policy(batch)
 
         # TODO(rcadene): policy.unnormalize_outputs(out_dict)
 
@@ -661,7 +661,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                         if cam_key in eval_batch and eval_batch[cam_key].dtype == torch.uint8:
                             eval_batch[cam_key] = eval_batch[cam_key].to(dtype=torch.float32) / 255.0
                     eval_batch = preprocessor(eval_batch)
-                    loss, _ = policy.forward(eval_batch)
+                    loss, _ = policy(eval_batch)
                     eval_loss_sum += loss.item()
                     n_eval_batches += 1
             eval_loss = eval_loss_sum / max(n_eval_batches, 1)
