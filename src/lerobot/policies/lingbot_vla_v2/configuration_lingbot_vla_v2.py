@@ -291,6 +291,16 @@ class LingbotVLAV2Config(PreTrainedConfig):
     # once per action chunk; compiling it removes the per-layer launch gaps that
     # dominate its eager wall time.
     compile_prefix: bool = False
+    # Capture the whole denoise loop (the num_steps predict_velocity calls plus
+    # the Euler updates) as one CUDA graph and replay it per action chunk: the
+    # loop's per-step guard evaluations and Python glue disappear into a single
+    # graph replay, which is the dominant host-side cost once the loop is
+    # compiled. Numerically lossless — a replay re-executes the identical kernel
+    # sequence on copied-in inputs (validated bitwise against the plain loop).
+    # CUDA only; works with or without compile_predict_velocity. The first call
+    # pays two extra warmup iterations plus capture; if observation shapes
+    # change or capture fails it falls back to the plain loop with a warning.
+    use_cudagraph_denoise: bool = False
     # Compute/log the MoE monitoring metrics (per-layer MaxVio/entropy/dead-expert,
     # plus the per-metric .item() syncs) once every N training steps. 1 = every
     # step (original behavior).

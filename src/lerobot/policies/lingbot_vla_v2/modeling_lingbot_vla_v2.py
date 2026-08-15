@@ -1269,6 +1269,22 @@ class FlowMatchingV2(FlowMatchingV1):
                     )
                 self._compiled_predict_velocity = predict_velocity_fn
 
+        if getattr(self.config, "use_cudagraph_denoise", False):
+            graphed = self._denoise_loop_graphed(
+                predict_velocity_fn,
+                state,
+                prefix_pad_masks,
+                past_key_values,
+                noise,
+                prefix_position_ids,
+                time_values,
+                dt,
+            )
+            if graphed is not None:
+                logger.debug("Denoised %s steps (single CUDA graph replay)", len(time_values))
+                return graphed
+            # Shape change or capture failure — fall through to the plain loop.
+
         # Loop-invariant tensors (suffix 2D masks / position ids / mrope cos-sin /
         # flex BlockMask) are computed on the first predict_velocity call and reused
         # for the remaining denoise steps — they depend on the prefix masks only,
@@ -1290,6 +1306,153 @@ class FlowMatchingV2(FlowMatchingV1):
             x_t += dt * v_t
         logger.debug("Denoised %s steps", count)
         return x_t
+
+    @torch.no_grad()
+    def _denoise_loop_graphed(
+        self,
+        predict_velocity_fn,
+        state,
+        prefix_pad_masks,
+        past_key_values,
+        noise,
+        prefix_position_ids,
+        time_values,
+        dt,
+    ):
+        """Run the denoise loop as a single captured CUDA graph.
+
+        Returns the denoised action chunk, or None when the graph is
+        unavailable — non-CUDA input, an observation-shape change, or a
+        capture failure — so the caller falls back to the plain loop.
+        """
+        if not state.is_cuda:
+            return None
+        kv_items = tuple(sorted(past_key_values.items()))
+        sig = (
+            tuple(noise.shape),
+            tuple(state.shape),
+            tuple(prefix_pad_masks.shape),
+            tuple(prefix_position_ids.shape),
+            tuple(
+                (idx, tuple(kv["key_states"].shape), tuple(kv["value_states"].shape)) for idx, kv in kv_items
+            ),
+            len(time_values),
+        )
+        gs = getattr(self, "_denoise_graph_state", None)
+        if gs is not None and gs["sig"] != sig:
+            logger.warning(
+                "use_cudagraph_denoise: observation shapes changed; falling back to the plain denoise loop"
+            )
+            return None
+        if gs is None:
+            gs = self._capture_denoise_graph(
+                predict_velocity_fn,
+                state,
+                prefix_pad_masks,
+                past_key_values,
+                noise,
+                prefix_position_ids,
+                time_values,
+                dt,
+                sig,
+            )
+            if gs is None:
+                return None
+            self._denoise_graph_state = gs
+
+        # Replay: copy the live prefix outputs into the static buffers the
+        # graph reads, then re-execute the recorded kernel sequence. One
+        # _foreach_copy_ for the whole set (76 tensors for a 36-layer prefix):
+        # per-tensor copy_ launches would cost ~7ms of host time per chunk.
+        dsts = [gs["state"], gs["prefix_pad_masks"], gs["prefix_position_ids"], gs["x_t"]]
+        srcs = [state, prefix_pad_masks, prefix_position_ids, noise]
+        for idx, kv in kv_items:
+            dsts.append(gs["kv"][idx]["key_states"])
+            srcs.append(kv["key_states"])
+            dsts.append(gs["kv"][idx]["value_states"])
+            srcs.append(kv["value_states"])
+        torch._foreach_copy_(dsts, srcs)
+        gs["graph"].replay()
+        return gs["out"].clone()
+
+    @torch.no_grad()
+    def _capture_denoise_graph(
+        self,
+        predict_velocity_fn,
+        state,
+        prefix_pad_masks,
+        past_key_values,
+        noise,
+        prefix_position_ids,
+        time_values,
+        dt,
+        sig,
+    ):
+        static = {
+            "state": state.clone(),
+            "prefix_pad_masks": prefix_pad_masks.clone(),
+            "prefix_position_ids": prefix_position_ids.clone(),
+            "kv": {
+                idx: {"key_states": kv["key_states"].clone(), "value_states": kv["value_states"].clone()}
+                for idx, kv in past_key_values.items()
+            },
+            "x_t": noise.clone(),
+            "dt": dt.clone(),
+            "time_values": [t.clone() for t in time_values],
+        }
+        bsize = state.shape[0]
+
+        def run_loop():
+            # A fresh cache per call: step 1 takes the fill branch, later steps
+            # the cached branch — exactly matching the plain loop. Capturing
+            # with an already-populated cache would record the all-cached graph,
+            # a different compiled artifact whose bf16 fusion differences
+            # integrate over the denoise steps (measured as visible drift).
+            cache: dict = {}
+            x = static["x_t"]
+            for step_time in static["time_values"]:
+                v_t = predict_velocity_fn(
+                    static["state"],
+                    static["prefix_pad_masks"],
+                    static["kv"],
+                    x,
+                    step_time.expand(bsize),
+                    prefix_position_ids=static["prefix_position_ids"],
+                    _denoise_cache=cache,
+                )
+                x = x + static["dt"] * v_t
+            return x
+
+        try:
+            # Warm on the default stream so both compiled branches (fill +
+            # cached) exist, then once on a side stream so the allocator sees
+            # the loop's allocations outside the graph pool.
+            run_loop()
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                run_loop()
+            torch.cuda.current_stream().wait_stream(side)
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            # A recompile mid-capture would enqueue autotuning work on the
+            # capture stream; refuse it instead.
+            with torch.compiler.set_stance("fail_on_recompile"), torch.cuda.graph(graph):
+                static_out = run_loop()
+        except Exception as exc:
+            logger.warning(
+                "use_cudagraph_denoise: capture failed (%s: %s); using the plain denoise loop",
+                type(exc).__name__,
+                exc,
+            )
+            self.config.use_cudagraph_denoise = False  # don't retry on every call
+            return None
+
+        logger.info(
+            "use_cudagraph_denoise: captured the %s-step denoise loop as one CUDA graph",
+            len(time_values),
+        )
+        return {"sig": sig, "graph": graph, "out": static_out, **static}
 
     def predict_velocity(
         self,
