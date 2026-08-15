@@ -114,6 +114,10 @@ class LingbotVLAV2FeatureTransformStep(ProcessorStep):
     # through the HF image processor in one batched call, with the outputs staying
     # on-device for the vision tower. None keeps the per-camera CPU path.
     preprocess_device: str | None = None
+    # Qwen3-VL specific token/vision handling (mirrors the policy config fields).
+    use_qwen3_chat_template: bool = True
+    return_image_grid_thw: bool = True
+    qwen3vl_use_vision_boundaries: bool = True
 
     _feature_transform: Any = field(default=None, init=False, repr=False)
 
@@ -162,9 +166,9 @@ class LingbotVLAV2FeatureTransformStep(ProcessorStep):
             max_action_dim=self.max_action_dim,
             chunk_size=self.chunk_size,
             tokenizer_max_length=self.tokenizer_max_length,
-            use_qwen3_chat_template=True,
-            return_image_grid_thw=True,
-            qwen3vl_use_vision_boundaries=True,
+            use_qwen3_chat_template=self.use_qwen3_chat_template,
+            return_image_grid_thw=self.return_image_grid_thw,
+            qwen3vl_use_vision_boundaries=self.qwen3vl_use_vision_boundaries,
             resize_imgs_with_padding=tuple(self.resize_imgs_with_padding),
         )
         self._feature_transform = FeatureTransform(
@@ -203,7 +207,12 @@ class LingbotVLAV2FeatureTransformStep(ProcessorStep):
                 item[k] = img
             if action is not None:
                 item[ACTION] = _cpu(action[i])
-                item["action_is_pad"] = torch.zeros(self.chunk_size, dtype=torch.bool)
+                # FeatureTransform.apply reads the pad mask from the raw action key
+                # (``f"{org_actions[0]}_is_pad"``); fill it dynamically and let the
+                # apply side fall back to an all-False mask when absent.
+                org_actions = self._feature_transform.org_features["actions"]
+                pad_key = f"{org_actions[0]}_is_pad" if org_actions else "action_is_pad"
+                item[pad_key] = torch.zeros(self.chunk_size, dtype=torch.bool)
             # Task text can arrive as a list of strings, a collated tensor of indices,
             # or a plain scalar; normalize to a string for the chat template.
             if isinstance(task, torch.Tensor):
@@ -252,10 +261,6 @@ class LingbotVLAV2FeatureTransformStep(ProcessorStep):
             self._current_transition[TransitionKey.ACTION] = collated["actions"]
         return self._current_transition
 
-    def unapply_actions(self, actions: torch.Tensor) -> dict:
-        """Map a padded canonical action chunk back to the raw dataset keys."""
-        return self._feature_transform.unapply({"actions": actions})
-
     def get_config(self) -> dict[str, Any]:
         # Serialize the parsed contents rather than the (machine-specific) paths so a
         # pushed checkpoint reloads anywhere.
@@ -277,6 +282,9 @@ class LingbotVLAV2FeatureTransformStep(ProcessorStep):
             "image_max_pixels": self.image_max_pixels,
             "image_min_pixels": self.image_min_pixels,
             "preprocess_device": self.preprocess_device,
+            "use_qwen3_chat_template": self.use_qwen3_chat_template,
+            "return_image_grid_thw": self.return_image_grid_thw,
+            "qwen3vl_use_vision_boundaries": self.qwen3vl_use_vision_boundaries,
         }
 
     def transform_features(
@@ -325,6 +333,9 @@ def make_lingbot_vla_v2_pre_post_processors(
         image_max_pixels=config.image_max_pixels,
         image_min_pixels=config.image_min_pixels,
         preprocess_device=config.preprocess_device,
+        use_qwen3_chat_template=config.use_qwen3_chat_template,
+        return_image_grid_thw=config.return_image_grid_thw,
+        qwen3vl_use_vision_boundaries=config.qwen3vl_use_vision_boundaries,
     )
 
     input_steps: list[ProcessorStep] = [
@@ -390,13 +401,34 @@ def make_lingbot_vla_v2_pre_post_processors_from_pretrained(
     # silently keeps the source embodiment's mapping while the policy itself was
     # already re-resolved onto the new one.
     resolve_robot_config_and_stats(config)
+    # Same config -> step parameter set as ``make_lingbot_vla_v2_pre_post_processors``
+    # (paths excluded: their resolved contents are forwarded instead). Only fields the
+    # config actually carries (non-None) override the checkpoint's saved values.
     feature_step_overrides: dict[str, Any] = {}
-    if config.robot_config is not None:
-        feature_step_overrides["robot_config"] = config.robot_config
-    if config.norm_stats is not None:
-        feature_step_overrides["norm_stats"] = config.norm_stats
-    if getattr(config, "preprocess_device", None) is not None:
-        feature_step_overrides["preprocess_device"] = config.preprocess_device
+    for step_param, config_attr in (
+        ("robot_config", "robot_config"),
+        ("norm_stats", "norm_stats"),
+        ("chunk_size", "chunk_size"),
+        ("max_state_dim", "max_state_dim"),
+        ("max_action_dim", "max_action_dim"),
+        ("tokenizer_max_length", "tokenizer_max_length"),
+        ("canonical_joints", "canonical_joints"),
+        ("canonical_norm_type", "canonical_norm_type"),
+        ("cameras", "canonical_cameras"),
+        ("resize_imgs_with_padding", "resize_imgs_with_padding"),
+        ("image_max_pixels", "image_max_pixels"),
+        ("image_min_pixels", "image_min_pixels"),
+        ("preprocess_device", "preprocess_device"),
+        ("use_qwen3_chat_template", "use_qwen3_chat_template"),
+        ("return_image_grid_thw", "return_image_grid_thw"),
+        ("qwen3vl_use_vision_boundaries", "qwen3vl_use_vision_boundaries"),
+    ):
+        value = getattr(config, config_attr, None)
+        if value is not None:
+            feature_step_overrides[step_param] = value
+    processor_path = config.processor_path or config.tokenizer_path
+    if processor_path is not None:
+        feature_step_overrides["processor_path"] = processor_path
     if feature_step_overrides:
         preprocessor_overrides["lingbot_vla_v2_feature_transform"] = feature_step_overrides
 

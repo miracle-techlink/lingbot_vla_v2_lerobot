@@ -128,8 +128,8 @@ class LingbotVLAV2Config(PreTrainedConfig):
     # ==================== Feature transform (robot-config slot mapping) ====================
     # Per-embodiment robot config (YAML) mapping raw dataset state/action/image keys
     # onto the unified canonical slots, and the matching normalization-stats JSON.
-    # Both are resolved by the processor; leave None to fall back to a pass-through
-    # single-arm mapping built from the dataset's own features.
+    # Both are resolved by the processor; a robot config is REQUIRED — the processor
+    # raises when neither ``robot_config_path`` nor embedded ``robot_config`` is set.
     robot_config_path: str | None = None
     norm_stats_path: str | None = None
     # Parsed contents of the two files above. They are filled in when the processor /
@@ -210,11 +210,10 @@ class LingbotVLAV2Config(PreTrainedConfig):
     # (bias_update_speed=0) there. Both mechanisms are wired here so either can
     # be used, matching upstream train_lingbotvla.py.
     #
-    # Auxiliary-loss-FREE bias correction (opt-in). ``bias_update_speed`` (>0) is
-    # the step size for the optimizer pre-hook in ``moe_load_balance.py`` that
-    # nudges each block's ``e_score_correction_bias`` by -coeff*sign(load-mean)
-    # before every optimizer.step(). Registered by ``register_optim_hooks`` only
-    # when use_moe AND bias_update_speed > 0. Released recipe leaves it at 0.
+    # Auxiliary-loss-FREE bias correction (upstream-only). ``bias_update_speed``
+    # is parsed for checkpoint-config compatibility, but the optimizer pre-hook
+    # that would consume it is not ported — the field has no effect here.
+    # Released recipe leaves it at 0.
     bias_update_speed: float = 0.0
     # Center the correction bias each update (subtract per-layer mean) to pin
     # sum(bias)=0 and prevent cumulative drift. Routing-invariant hygiene.
@@ -299,7 +298,9 @@ class LingbotVLAV2Config(PreTrainedConfig):
     # sequence on copied-in inputs (validated bitwise against the plain loop).
     # CUDA only; works with or without compile_predict_velocity. The first call
     # pays two extra warmup iterations plus capture; if observation shapes
-    # change or capture fails it falls back to the plain loop with a warning.
+    # change the stale graph is dropped and re-captured (warning once per new
+    # shape), and a warm-up/capture failure disables the graph for this
+    # instance and falls back to the plain loop with a warning.
     use_cudagraph_denoise: bool = False
     # Compute/log the MoE monitoring metrics (per-layer MaxVio/entropy/dead-expert,
     # plus the per-metric .item() syncs) once every N training steps. 1 = every
@@ -345,6 +346,8 @@ class LingbotVLAV2Config(PreTrainedConfig):
         # ``_moe_implementation``; expose our public ``moe_implementation`` under that
         # private name so "fused" selects the stacked-parameter experts that the
         # released MoE checkpoints (e.g. the 6B) were saved with.
+        if self.moe_implementation is not None and self.moe_implementation not in ("eager", "fused"):
+            raise ValueError(f"Invalid moe_implementation: {self.moe_implementation}")
         self._moe_implementation = self.moe_implementation
 
         if self.n_action_steps > self.chunk_size:

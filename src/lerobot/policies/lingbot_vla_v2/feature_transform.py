@@ -19,7 +19,6 @@ from .data_transform import (
     prepare_state,
     prepare_language,
     prepare_action,
-    expert_visual_transform,
 )
 from .ee_pose_transform import *
 
@@ -346,7 +345,7 @@ class FeatureTransform:
         for feature_category, feature in org_features.items():
             if feature_category == "actions":
                 if len(feature) == 0 and len(self.actions_convert_from_state) > 0:
-                    org_features["actions"] == []
+                    org_features["actions"] = []
                     continue
             if len(feature) == 0:
                 org_features[feature_category] = target_features[feature_category]
@@ -435,7 +434,6 @@ class FeatureTransform:
             if isinstance(convert_info, list):
                 convert_info = sorted(convert_info, key=lambda x: x["end"])
                 concat_list = []
-                convert_success = True
                 for _convert_info in convert_info:
                     if _convert_info["target_key"] not in item:
                         raise ValueError(
@@ -446,8 +444,7 @@ class FeatureTransform:
                             ..., _convert_info["target_start"] : _convert_info["target_end"]
                         ]
                     )
-                if convert_success:
-                    out_item[target_key] = torch.cat(concat_list, dim=-1)
+                out_item[target_key] = torch.cat(concat_list, dim=-1)
 
         for feature in self.feature_to_keep:
             if feature in item:
@@ -458,11 +455,17 @@ class FeatureTransform:
     def apply(self, item, policy_eval=False):
         w_action = not policy_eval
         if w_action:
-            item["action_is_pad"] = (
-                item[f"{self.org_features['actions'][0]}_is_pad"]
-                if not len(self.actions_convert_from_state) > 0
-                else item[f"{self.org_features['states'][0]}_is_pad"][1:]
-            )
+            pad_all_false = torch.zeros(self.chunk_size, dtype=torch.bool)
+            if len(self.actions_convert_from_state) > 0:
+                pad_key = f"{self.org_features['states'][0]}_is_pad"
+                is_pad = item.get(pad_key)
+                item["action_is_pad"] = is_pad[1:] if is_pad is not None else pad_all_false
+            else:
+                pad_key = (
+                    f"{self.org_features['actions'][0]}_is_pad" if self.org_features["actions"] else None
+                )
+                is_pad = item.get(pad_key) if pad_key is not None else None
+                item["action_is_pad"] = is_pad if is_pad is not None else pad_all_false
         else:
             item["action_is_pad"] = torch.zeros(self.chunk_size)
         item = self.convert_features(item, w_action=w_action)
@@ -553,7 +556,7 @@ class FeatureTransform:
 
         state_joint_mask = batch_dict["state_joint_mask"]
         assert self.model_config.max_state_dim >= state_joint_mask.shape[-1], (
-            f"max_action_dim is smaller than the state joint dimension: {self.model_config.max_action_dim} < {state_joint_mask.shape[-1]}"
+            f"max_state_dim is smaller than the state joint dimension: {self.model_config.max_state_dim} < {state_joint_mask.shape[-1]}"
         )
         state_joint_mask = F.pad(
             state_joint_mask, (0, self.model_config.max_state_dim - state_joint_mask.shape[-1])
@@ -637,20 +640,28 @@ class FeatureTransform:
         state = item["state"][state_joint_mask]
         action = item["actions"][:, action_joint_mask]
 
+        state_offset = 0
+        action_offset = 0
         for k in self.feature_config.joints:
+            joint_width = self.feature_config.joints_max_dim[k]
             state_key = f"observation.state.{k}"
             if state_key in self.states:
-                joint_dim = self.normalizer.norm_stats[state_key]["mean"].shape[-1]
+                # Real (pre-padding) dim of this slot: the joint masks mark padded
+                # slots False, so the segment sum recovers it without norm stats
+                # (which do not exist when do_normalize=False).
+                joint_dim = int(state_joint_mask[state_offset : state_offset + joint_width].sum())
                 reverse_item[state_key] = state[:joint_dim]
                 state = state[joint_dim:]
             del state_key
+            state_offset += joint_width
 
             action_key = f"action.{k}"
             if action_key in self.actions:
-                joint_dim = self.normalizer.norm_stats[action_key]["mean"].shape[-1]
+                joint_dim = int(action_joint_mask[action_offset : action_offset + joint_width].sum())
                 reverse_item[action_key] = action[:, :joint_dim]
                 action = action[:, joint_dim:]
             del action_key
+            action_offset += joint_width
         return reverse_item
 
     def pad_and_concat(self, item, w_action=True):

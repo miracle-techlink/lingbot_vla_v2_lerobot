@@ -238,12 +238,19 @@ Captures the entire denoise loop into a single CUDA graph replay.
 - Zero numerical change — bitwise verified (`max|delta|=0`) across varying observations,
   first call, `sdpa`/`eager`, and with/without compile.
 - The first call costs two extra warm-up + capture passes.
-- Observation shape changes automatically fall back to the plain loop (a warning is
-  logged).
+- Observation shape changes drop the stale graph and re-capture (a warning is logged
+  once per new shape); a warm-up/capture failure disables the graph for the instance
+  and falls back to the plain loop.
 - CUDA only.
 
 Numerical validation discipline: any performance change must pass the bitwise-comparison
-template with fixed seed and fixed noise in `bench/` (the `e1_val.py` pattern).
+template with fixed seed and fixed noise in `bench/` (the `graph_integ.py` pattern).
+Bitwise comparisons must run with compile **off** (eager): under
+`mode="max-autotune-no-cudagraphs"` a cold or invalidated inductor cache re-tunes kernel
+choices, and the resulting bf16 reassociation makes outputs differ by ~0.1 (max abs) even
+for byte-identical code — measured 0.06-0.13 on the same checkpoint. Eager kernels are
+deterministic, so only an eager-mode bitwise diff of exactly 0 proves a refactor
+numerically neutral.
 
 ### RTC (Real-Time Chunking)
 

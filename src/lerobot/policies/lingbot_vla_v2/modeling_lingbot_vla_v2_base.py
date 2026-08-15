@@ -160,6 +160,11 @@ class FlowMatching(nn.Module):
         raise TypeError("FlowMatching is a helper base for FlowMatchingV2 and is not instantiated directly.")
 
     def init_depth_heads(self, config):
+        if TaskTokenDepthHead is None:
+            raise NotImplementedError(
+                "TaskTokenDepthHead is not ported in this LeRobot integration; "
+                "align_params depth heads are unavailable."
+            )
         self.llm_image_token_size = config["llm"]["image_token_size"]
         self.llm_image_input_size = config["llm"]["image_input_size"]
         self.depth_token_size = config["depth"]["token_size"]
@@ -212,6 +217,11 @@ class FlowMatching(nn.Module):
                 p.requires_grad = True
 
     def init_video_heads(self, config):
+        if TaskTokenDepthHead is None:
+            raise NotImplementedError(
+                "TaskTokenDepthHead is not ported in this LeRobot integration; "
+                "align_params video heads are unavailable."
+            )
         if self.align_type != "query":
             raise ValueError("future-video alignment is only supported for query align mode.")
 
@@ -644,6 +654,8 @@ class FlowMatching(nn.Module):
             # losses = torch.mean((v_t - u_t)**2, dim=-1)
         elif loss_type == "L1_fm":
             losses = F.l1_loss(u_t, v_t, reduction="none")
+        else:
+            raise ValueError(f"Unsupported loss_type: {loss_type!r} (expected 'fm' or 'L1_fm').")
 
         # Sequence-wise balance loss (DeepSeek-V3 style, for token-MoE only)
         seq_wise_loss_coeff = getattr(self.config, "sequence_wise_loss_coeff", 0)
@@ -660,6 +672,18 @@ class FlowMatching(nn.Module):
                 if not token_moe_layers_list
                 or (token_moe_layers_list[i] if i < len(token_moe_layers_list) else i) in token_moe_layers_set
             )
+            token_router_biases = tuple(
+                getattr(
+                    self.qwenvl_with_expert.qwen_expert.model.layers[
+                        token_moe_layers_list[i] if i < len(token_moe_layers_list) else i
+                    ].mlp,
+                    "e_score_correction_bias",
+                    None,
+                )
+                for i, logits in enumerate(router_logits_list)
+                if not token_moe_layers_list
+                or (token_moe_layers_list[i] if i < len(token_moe_layers_list) else i) in token_moe_layers_set
+            )
 
             if token_router_logits:
                 token_top_k = getattr(self.config, "token_top_k", 4)
@@ -672,6 +696,7 @@ class FlowMatching(nn.Module):
                     top_k=token_top_k,
                     seq_lengths=None,
                     padding_len=0,
+                    e_score_correction_bias_list=token_router_biases,
                 )
                 if layer_losses:
                     seq_wise_loss = seq_wise_loss_coeff * torch.stack(layer_losses).mean()
@@ -688,13 +713,9 @@ class FlowMatching(nn.Module):
                     num_experts = logits.shape[-1]
                     routing_probs = F.softmax(logits, dim=1, dtype=torch.float)
 
-                    moe_block = self.qwenvl_with_expert.qwen_expert.model.layers[layer_id].mlp
-                    if hasattr(moe_block, "last_tokens_per_expert"):
-                        counts = moe_block.last_tokens_per_expert.clone()
-                    else:
-                        _, selected = torch.topk(routing_probs, 1, dim=-1)
-                        expert_indices = selected.squeeze(-1)
-                        counts = F.one_hot(expert_indices, num_classes=num_experts).float().sum(dim=0)
+                    _, selected = torch.topk(routing_probs, 1, dim=-1)
+                    expert_indices = selected.squeeze(-1)
+                    counts = F.one_hot(expert_indices, num_classes=num_experts).float().sum(dim=0)
 
                     token_expert_counts.append((layer_id, counts))
 
@@ -819,8 +840,6 @@ class FlowMatching(nn.Module):
     def depth_emb_forward(self, hidden_states, depth_targets=None, img_masks=None, future_depth_targets=None):
         chunk_size = self.llm_image_token_size * self.llm_image_token_size
         num_images = img_masks.shape[1] if img_masks is not None and img_masks.ndim == 2 else 3
-        if img_masks is not None:
-            img_masks = einops.rearrange(img_masks, "b n -> (b n)")
         image_embs = hidden_states[:, chunk_size * 0 + 1 : chunk_size * 1 + 1, :]
         align_embs = self._current_depth_task_tokens(hidden_states, num_images=num_images)
         align_embs = torch.cat([image_embs, align_embs], dim=1)

@@ -63,7 +63,6 @@ def _update_moe_runtime_stats(block, routing_weights, selected_experts):
             )
 
 
-import transformers.models.qwen2.modeling_qwen2 as hf_qwen2
 from transformers.models.qwen2.modeling_qwen2 import (
     Qwen2MLP,
     rotate_half,
@@ -81,10 +80,6 @@ from transformers.models.qwen2.modeling_qwen2 import (
     Qwen2ForCausalLM as _Qwen2ForCausalLM,
 )
 
-try:
-    from lingbotvla.ops.robby_moe import robby_moe_forward  # fused triton MoE (optional)
-except Exception:
-    robby_moe_forward = None
 # from transformers.models.mistral.modeling_mistral import MistralMLP
 
 
@@ -144,8 +139,7 @@ class Qwen2FusedExperts(nn.Module):
         self._gate_up_proj_cache_key = None
         self.register_buffer("_dense_w1_cache", None, persistent=False)
         self.register_buffer("_dense_w2_cache", None, persistent=False)
-        self._robby_moe_workspace = None
-        self._robby_moe_workspace_key = None
+        self._dense_cache_key = None
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -159,43 +153,12 @@ class Qwen2FusedExperts(nn.Module):
         self._gate_up_proj_cache_key = None
         self._dense_w1_cache = None
         self._dense_w2_cache = None
-        self._robby_moe_workspace = None
-        self._robby_moe_workspace_key = None
+        self._dense_cache_key = None
 
-    def _get_robby_moe_workspace(self, hidden_states, top_k):
-        if self.training or torch.is_grad_enabled() or not hidden_states.is_cuda:
-            return None
-        num_tokens, hidden_size = hidden_states.shape
-        key = (
-            num_tokens,
-            int(top_k),
-            self.num_experts,
-            hidden_size,
-            self.intermediate_size,
-            hidden_states.dtype,
-            hidden_states.device,
-        )
-        if self._robby_moe_workspace is None or self._robby_moe_workspace_key != key:
-            max_routes = num_tokens * int(top_k)
-            self._robby_moe_workspace = {
-                "counts": torch.empty((self.num_experts,), device=hidden_states.device, dtype=torch.int32),
-                "rows": torch.empty(
-                    (self.num_experts, max_routes), device=hidden_states.device, dtype=torch.int32
-                ),
-                "slots": torch.empty(
-                    (self.num_experts, max_routes), device=hidden_states.device, dtype=torch.int32
-                ),
-                "inter": torch.empty(
-                    (num_tokens, int(top_k), self.intermediate_size),
-                    device=hidden_states.device,
-                    dtype=hidden_states.dtype,
-                ),
-                "out": torch.empty(
-                    (num_tokens, hidden_size), device=hidden_states.device, dtype=torch.float32
-                ),
-            }
-            self._robby_moe_workspace_key = key
-        return self._robby_moe_workspace
+    def _load_from_state_dict(self, *args, **kwargs):
+        # Loading weights invalidates the packed inference caches.
+        super()._load_from_state_dict(*args, **kwargs)
+        self.clear_inference_cache()
 
     def _dense_packed_weights(self):
         """E-major repacked weights for the two-GEMM dense path.
@@ -214,7 +177,11 @@ class Qwen2FusedExperts(nn.Module):
             w1 = torch.cat([self.gate_proj, self.up_proj], dim=1).reshape(E * 2 * inter_dim, H).t()
             w2 = self.down_proj.permute(0, 2, 1).reshape(E * inter_dim, H)
             return w1, w2
-        if self._dense_w1_cache is None:
+        # Key on the parameter versions: in-place updates (optimizer.step,
+        # load_state_dict copy_) bump _version, so stale packed weights are
+        # rebuilt instead of silently serving the old values.
+        cache_key = (self.gate_proj._version, self.up_proj._version, self.down_proj._version)
+        if self._dense_w1_cache is None or self._dense_cache_key != cache_key:
             with torch.no_grad():
                 self._dense_w1_cache = (
                     torch.cat([self.gate_proj, self.up_proj], dim=1)
@@ -223,6 +190,7 @@ class Qwen2FusedExperts(nn.Module):
                     .contiguous()
                 )
                 self._dense_w2_cache = self.down_proj.permute(0, 2, 1).reshape(E * inter_dim, H).contiguous()
+            self._dense_cache_key = cache_key
         return self._dense_w1_cache, self._dense_w2_cache
 
     def _dense_forward(self, routing_weights, selected_experts, hidden_states):
@@ -259,11 +227,10 @@ class Qwen2FusedExperts(nn.Module):
     def forward(self, module, num_experts, routing_weights, selected_experts, hidden_states):
         """Run the fused experts with FSDP2-managed weights.
 
-        Must be called via self.experts(...) so FSDP2 unshards params first. Backend order:
-        the optional vendor triton kernel, then an in-tree ``@triton.jit`` grouped-GEMM
-        (:mod:`.triton_moe`, transitively available with CUDA torch), then a pure-torch
-        grouped-by-expert eager fallback (:meth:`_eager_forward`). All three are numerically
-        equivalent up to floating-point / tensor-core reassociation.
+        Must be called via self.experts(...) so FSDP2 unshards params first. Two pure-torch
+        backends, numerically equivalent up to floating-point / tensor-core reassociation:
+        a dense two-GEMM path for small token counts and a grouped-by-expert eager fallback
+        (:meth:`_eager_forward`) for everything else (CPU / large T / training).
         """
         # 1) dense two-GEMM path for small token counts (flow-matching denoise:
         # T ~= 51). Pure torch, static shapes, no graph breaks under torch.compile.
@@ -271,34 +238,7 @@ class Qwen2FusedExperts(nn.Module):
         if dense_max_tokens > 0 and hidden_states.shape[0] <= dense_max_tokens:
             return self._dense_forward(routing_weights, selected_experts, hidden_states)
 
-        # 2) vendor triton kernel, if the external package is installed.
-        try:
-            from lingbotvla.ops.fused_moe import fused_moe_forward
-
-            return fused_moe_forward(
-                module=module,
-                num_experts=num_experts,
-                routing_weights=routing_weights,
-                selected_experts=selected_experts,
-                hidden_states=hidden_states,
-                fc1_1_weight=self.gate_proj,
-                fc1_2_weight=self.up_proj,
-                fc2_weight=self.down_proj,
-            )
-        except ImportError:
-            pass
-
-        # 3) in-tree triton grouped-GEMM (no extra dependency); guarded, CUDA + inference only.
-        if hidden_states.is_cuda and not torch.is_grad_enabled():
-            from .triton_moe import triton_grouped_moe, triton_moe_available
-
-            if triton_moe_available():
-                try:
-                    return triton_grouped_moe(self, routing_weights, selected_experts, hidden_states)
-                except Exception as exc:  # noqa: BLE001 - any kernel failure -> safe fallback
-                    logger.warning_once(f"triton grouped-MoE failed ({exc}); using eager fallback")
-
-        # 4) pure-torch grouped-by-expert eager fallback (CPU / no triton / training).
+        # 2) pure-torch grouped-by-expert eager fallback (CPU / large T / training).
         return self._eager_forward(routing_weights, selected_experts, hidden_states)
 
     def _eager_forward(self, routing_weights, selected_experts, hidden_states):
@@ -388,11 +328,6 @@ class Qwen2TokenMoeBlock(nn.Module):
             persistent=False,
         )
         self.register_buffer(
-            "last_tokens_per_expert",
-            torch.zeros(config.num_experts, dtype=torch.float32),
-            persistent=False,
-        )
-        self.register_buffer(
             "avg_topk_sigmoid_score",
             torch.zeros(1, dtype=torch.float32),
             persistent=False,
@@ -401,7 +336,7 @@ class Qwen2TokenMoeBlock(nn.Module):
         # gating (per-token)
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
         # Token-count ceiling for the dense two-GEMM MoE path (0 disables it and
-        # falls through to the triton / grouped-eager backends).
+        # falls through to the grouped-eager backend).
         self._dense_max_tokens = getattr(config, "moe_dense_max_tokens", 512)
 
         # EP/fused support: choose expert storage based on moe_implementation
@@ -459,47 +394,15 @@ class Qwen2TokenMoeBlock(nn.Module):
             routing_weights = routing_weights * self.routed_scaling_factor
         routing_weights = routing_weights.to(hidden_states.dtype)
 
-        # Expert computation: dense two-GEMM (small T) / vendor triton / grouped eager
+        # Expert computation: dense two-GEMM (small T) / grouped eager (fallback)
         if self._moe_implementation == "fused":
-            use_dense = self._dense_max_tokens > 0 and hidden_flat.shape[0] <= self._dense_max_tokens
-            use_robby_moe = (
-                not use_dense
-                and robby_moe_forward is not None
-                and hidden_flat.is_cuda
-                and not self.training
-                and not torch.is_grad_enabled()
+            final_hidden_states = self.experts(
+                module=self,
+                num_experts=self.num_experts,
+                routing_weights=routing_weights,
+                selected_experts=selected_experts,
+                hidden_states=hidden_flat,
             )
-            if use_robby_moe:
-                try:
-                    final_hidden_states = robby_moe_forward(
-                        hidden_flat,
-                        routing_weights,
-                        selected_experts,
-                        self.experts.gate_proj,
-                        self.experts.up_proj,
-                        self.experts.down_proj,
-                        workspace=self.experts._get_robby_moe_workspace(
-                            hidden_flat,
-                            selected_experts.shape[1],
-                        ),
-                    )
-                except Exception as exc:
-                    logger.warning_once(f"robby_moe_forward failed, falling back to fused_moe_forward: {exc}")
-                    final_hidden_states = self.experts(
-                        module=self,
-                        num_experts=self.num_experts,
-                        routing_weights=routing_weights,
-                        selected_experts=selected_experts,
-                        hidden_states=hidden_flat,
-                    )
-            else:
-                final_hidden_states = self.experts(
-                    module=self,
-                    num_experts=self.num_experts,
-                    routing_weights=routing_weights,
-                    selected_experts=selected_experts,
-                    hidden_states=hidden_flat,
-                )
         else:
             # Original eager path: every expert processes all tokens
             expert_outputs = torch.stack(
@@ -644,7 +547,14 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
     get_input_embeddings = _Qwen2Model.get_input_embeddings
     set_input_embeddings = _Qwen2Model.set_input_embeddings
-    forward = _Qwen2Model.forward
+
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError(
+            "This vendored Qwen2Model is only driven by LingBot-VLA internals "
+            "(QwenvlWithExpert calls its layers with the custom compute_kqv/"
+            "output_atten signature); the HF-native forward is intentionally "
+            "not supported."
+        )
 
     def __init__(self, config: Qwen2Config, eval=False):
         super().__init__(config)
@@ -674,9 +584,16 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     set_input_embeddings = _Qwen2ForCausalLM.set_input_embeddings
     get_output_embeddings = _Qwen2ForCausalLM.get_output_embeddings
     set_output_embeddings = _Qwen2ForCausalLM.set_output_embeddings
-    forward = _Qwen2ForCausalLM.forward
     set_decoder = _Qwen2ForCausalLM.set_decoder
     get_decoder = _Qwen2ForCausalLM.get_decoder
+
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError(
+            "This vendored Qwen2ForCausalLM is only driven by LingBot-VLA internals "
+            "(QwenvlWithExpert calls its layers with the custom compute_kqv/"
+            "output_atten signature); the HF-native forward is intentionally "
+            "not supported."
+        )
 
     def __init__(self, config, eval):
         super().__init__(config)
@@ -686,10 +603,3 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
         # Initialize weights and apply final processing
         self.post_init()
-
-
-def apply_lingbot_qwen2_patch():
-    hf_qwen2.Qwen2DecoderLayer = Qwen2DecoderLayer
-    hf_qwen2.Qwen2PreTrainedModel = Qwen2PreTrainedModel
-    hf_qwen2.Qwen2Model = Qwen2Model
-    hf_qwen2.Qwen2ForCausalLM = Qwen2ForCausalLM

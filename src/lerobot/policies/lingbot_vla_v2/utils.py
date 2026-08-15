@@ -236,7 +236,8 @@ def our_eager_attention_forward(
         query_states: Query tensor of shape [batch_size, seq_len, num_attention_heads, head_dim].
         key_states: Key tensor of shape [batch_size, seq_len, num_key_value_heads, head_dim].
         value_states: Value tensor of shape [batch_size, seq_len, num_key_value_heads, head_dim].
-        attention_mask: Attention mask tensor, typically [batch_size, 1, seq_len, seq_len] or [batch_size, seq_len, seq_len].
+        attention_mask: Bool attention mask (True = attend) of shape [batch_size, seq_len, seq_len]
+            or [batch_size, 1, seq_len, seq_len]. None applies no mask.
 
     Returns:
         Output tensor of shape [batch_size, seq_len, num_attention_heads * head_dim].
@@ -255,9 +256,12 @@ def our_eager_attention_forward(
     att_weights *= head_dim**-0.5
 
     big_neg = -2.3819763e38
-    masked_att_weights = torch.where(attention_mask[:, None, :, :], att_weights, big_neg)
+    if attention_mask is not None:
+        if attention_mask.dim() == 3:  # [B, L, L] -> [B, 1, L, L] to broadcast over heads
+            attention_mask = attention_mask[:, None, :, :]
+        att_weights = torch.where(attention_mask, att_weights, big_neg)
 
-    probs = nn.functional.softmax(masked_att_weights, dim=-1)
+    probs = nn.functional.softmax(att_weights, dim=-1)
     probs = probs.to(dtype=value_states.dtype)
 
     value_states_permuted = torch.einsum("blhd->bhld", value_states)  # [B, H, L_v, D]

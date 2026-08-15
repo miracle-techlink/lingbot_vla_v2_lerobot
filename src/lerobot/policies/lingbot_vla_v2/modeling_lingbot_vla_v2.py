@@ -26,6 +26,7 @@ from .qwen3vl_in_vla import (
     Qwen3VLForConditionalGeneration,
     Qwen3VLTextModel,
     Qwen3VLPreTrainedModel,
+    apply_lingbot_qwen3_vl_patch,
     apply_rotary_pos_emb,
 )
 from .modeling_lingbot_vla_v2_base import (
@@ -139,6 +140,10 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
     def __init__(self, config: QwenvlWithExpertV2Config, eval=False):
         super().__init__(config=config)
         self.config = config
+        # The model relies on the patched Qwen3-VL classes (custom text decoder
+        # layer / vision forward signature); apply the patch idempotently here so
+        # building the model directly (without the processor) works as well.
+        apply_lingbot_qwen3_vl_patch()
         # Map our attention_implementation to a transformers-valid attn class for the
         # HF model instantiation. "fa2" -> flash_attention_2; everything else (eager /
         # flex / flex_cached) builds with "eager" — the flex paths override attention in
@@ -1099,6 +1104,8 @@ class FlowMatchingV2(FlowMatchingV1):
             losses = F.mse_loss(u_t, v_t, reduction="none")
         elif loss_type == "L1_fm":
             losses = F.l1_loss(u_t, v_t, reduction="none")
+        else:
+            raise ValueError(f"Unsupported loss_type: {loss_type!r} (expected 'fm' or 'L1_fm').")
 
         seq_wise_loss, router_z_loss, moe_metrics = self._moe_losses_and_metrics(
             router_logits_list, losses, collect_metrics=collect_metrics
@@ -1151,6 +1158,15 @@ class FlowMatchingV2(FlowMatchingV1):
         )
         return prefix_pad_masks, prefix_position_ids, past_key_values
 
+    def _compile_with_mode(self, fn):
+        """torch.compile with the shared mode. The default mode keeps
+        triton.cudagraphs off via options (torch.compile forbids mode+options
+        together; the *-no-cudagraphs modes already keep CUDA graphs off)."""
+        mode = getattr(self, "_compile_predict_velocity_mode", "default")
+        if mode == "default":
+            return torch.compile(fn, fullgraph=False, dynamic=False, options={"triton.cudagraphs": False})
+        return torch.compile(fn, fullgraph=False, dynamic=False, mode=mode)
+
     def sample_actions(
         self,
         images,
@@ -1162,6 +1178,13 @@ class FlowMatchingV2(FlowMatchingV1):
         image_grid_thw=None,
     ) -> Tensor:
         """Do a full Qwen3-VL inference forward and compute the action."""
+        if not getattr(self.config, "use_cache", True):
+            raise ValueError(
+                "sample_actions requires config.use_cache=True: the denoise loop reuses "
+                "the prefix KV cache, and with use_cache=False the prefix fill returns "
+                "past_key_values=None. (Training forward does not go through "
+                "sample_actions and is unaffected.)"
+            )
         bsize = state.shape[0]
         device = state.device
         dtype = state.dtype
@@ -1177,23 +1200,7 @@ class FlowMatchingV2(FlowMatchingV1):
         if getattr(self, "_use_compile_prefix", False):
             prefix_fn = getattr(self, "_compiled_prefix", None)
             if prefix_fn is None:
-                mode = getattr(self, "_compile_predict_velocity_mode", "default")
-                if mode == "default":
-                    prefix_fn = torch.compile(
-                        self._embed_and_fill_prefix,
-                        fullgraph=False,
-                        dynamic=False,
-                        options={"triton.cudagraphs": False},
-                    )
-                else:
-                    # torch.compile forbids mode+options together; the
-                    # *-no-cudagraphs modes already keep CUDA graphs off.
-                    prefix_fn = torch.compile(
-                        self._embed_and_fill_prefix,
-                        fullgraph=False,
-                        dynamic=False,
-                        mode=mode,
-                    )
+                prefix_fn = self._compile_with_mode(self._embed_and_fill_prefix)
                 self._compiled_prefix = prefix_fn
             prefix_pad_masks, prefix_position_ids, past_key_values = prefix_fn(
                 images,
@@ -1203,32 +1210,12 @@ class FlowMatchingV2(FlowMatchingV1):
                 image_grid_thw,
             )
         else:
-            (
-                prefix_embs,
-                prefix_pad_masks,
-                prefix_att_masks,
-                prefix_position_ids,
-                visual_pos_masks,
-                deepstack_visual_embeds,
-            ) = self.embed_prefix(
+            prefix_pad_masks, prefix_position_ids, past_key_values = self._embed_and_fill_prefix(
                 images,
                 img_masks,
                 lang_tokens,
                 lang_masks,
-                image_grid_thw=image_grid_thw,
-            )
-            prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
-
-            _, past_key_values, _ = self.qwenvl_with_expert.forward(
-                attention_mask=prefix_att_2d_masks,
-                position_ids=prefix_position_ids,
-                vlm_position_ids=prefix_position_ids,
-                past_key_values=None,
-                inputs_embeds=[prefix_embs, None],
-                use_cache=self.config.use_cache,
-                fill_kv_cache=True,
-                visual_pos_masks=visual_pos_masks,
-                deepstack_visual_embeds=deepstack_visual_embeds,
+                image_grid_thw,
             )
 
         dt = torch.tensor(-1.0 / self.config.num_steps, dtype=dtype, device=device)
@@ -1250,23 +1237,7 @@ class FlowMatchingV2(FlowMatchingV1):
         if getattr(self, "_use_compile_predict_velocity", False):
             predict_velocity_fn = getattr(self, "_compiled_predict_velocity", None)
             if predict_velocity_fn is None:
-                mode = getattr(self, "_compile_predict_velocity_mode", "default")
-                if mode == "default":
-                    predict_velocity_fn = torch.compile(
-                        self.predict_velocity,
-                        fullgraph=False,
-                        dynamic=False,
-                        options={"triton.cudagraphs": False},
-                    )
-                else:
-                    # torch.compile forbids mode+options together; the
-                    # *-no-cudagraphs modes already keep CUDA graphs off.
-                    predict_velocity_fn = torch.compile(
-                        self.predict_velocity,
-                        fullgraph=False,
-                        dynamic=False,
-                        mode=mode,
-                    )
+                predict_velocity_fn = self._compile_with_mode(self.predict_velocity)
                 self._compiled_predict_velocity = predict_velocity_fn
 
         if getattr(self.config, "use_cudagraph_denoise", False):
@@ -1322,15 +1293,24 @@ class FlowMatchingV2(FlowMatchingV1):
         """Run the denoise loop as a single captured CUDA graph.
 
         Returns the denoised action chunk, or None when the graph is
-        unavailable — non-CUDA input, an observation-shape change, or a
-        capture failure — so the caller falls back to the plain loop.
+        unavailable — non-CUDA input, `use_cache=False`, or a warm-up/capture
+        failure — so the caller falls back to the plain loop. An
+        observation-shape change drops the stale graph and re-captures.
         """
         if not state.is_cuda:
+            return None
+        if getattr(self, "_denoise_graph_disabled", False):
+            return None
+        if past_key_values is None:
+            # use_cache=False: there is no KV cache to freeze into the graph.
             return None
         kv_items = tuple(sorted(past_key_values.items()))
         sig = (
             tuple(noise.shape),
+            noise.dtype,
+            str(noise.device),
             tuple(state.shape),
+            state.dtype,
             tuple(prefix_pad_masks.shape),
             tuple(prefix_position_ids.shape),
             tuple(
@@ -1340,10 +1320,15 @@ class FlowMatchingV2(FlowMatchingV1):
         )
         gs = getattr(self, "_denoise_graph_state", None)
         if gs is not None and gs["sig"] != sig:
-            logger.warning(
-                "use_cudagraph_denoise: observation shapes changed; falling back to the plain denoise loop"
-            )
-            return None
+            warned = getattr(self, "_denoise_graph_warned", None)
+            if warned is None:
+                warned = self._denoise_graph_warned = set()
+            if sig not in warned:
+                logger.warning(
+                    "use_cudagraph_denoise: observation shapes changed; re-capturing the denoise graph"
+                )
+                warned.add(sig)
+            gs = None  # drop the stale graph (frees its private pool) and re-capture below
         if gs is None:
             gs = self._capture_denoise_graph(
                 predict_velocity_fn,
@@ -1423,10 +1408,12 @@ class FlowMatchingV2(FlowMatchingV1):
                 x = x + static["dt"] * v_t
             return x
 
+        # Warm on the default stream so both compiled branches (fill +
+        # cached) exist, then once on a side stream so the allocator sees
+        # the loop's allocations outside the graph pool. A warm-up failure is
+        # not a capture failure: disable the graph and let the plain loop
+        # surface the real error.
         try:
-            # Warm on the default stream so both compiled branches (fill +
-            # cached) exist, then once on a side stream so the allocator sees
-            # the loop's allocations outside the graph pool.
             run_loop()
             side = torch.cuda.Stream()
             side.wait_stream(torch.cuda.current_stream())
@@ -1434,6 +1421,16 @@ class FlowMatchingV2(FlowMatchingV1):
                 run_loop()
             torch.cuda.current_stream().wait_stream(side)
             torch.cuda.synchronize()
+        except Exception as exc:
+            logger.warning(
+                "use_cudagraph_denoise: warm-up pass failed (%s: %s); using the plain denoise loop",
+                type(exc).__name__,
+                exc,
+            )
+            self._denoise_graph_disabled = True  # don't retry on every call
+            return None
+
+        try:
             graph = torch.cuda.CUDAGraph()
             # A recompile mid-capture would enqueue autotuning work on the
             # capture stream; refuse it instead.
@@ -1445,7 +1442,7 @@ class FlowMatchingV2(FlowMatchingV1):
                 type(exc).__name__,
                 exc,
             )
-            self.config.use_cudagraph_denoise = False  # don't retry on every call
+            self._denoise_graph_disabled = True  # don't retry on every call
             return None
 
         logger.info(
@@ -1572,12 +1569,26 @@ class FlowMatchingV2(FlowMatchingV1):
                 B = losses.shape[0]
                 N = router_logits_list[0].shape[0]
                 seq_lengths = [N // B] * B
+            seqwise_moe_layer_ids = sorted(getattr(self.config, "token_moe_layers", None) or [])
+            # Per-layer e_score_correction_bias so the loss's f_i top-k matches the
+            # router's actual (bias-corrected) selection.
+            seqwise_router_biases = tuple(
+                getattr(
+                    self.qwenvl_with_expert.qwen_expert.model.layers[
+                        seqwise_moe_layer_ids[i] if i < len(seqwise_moe_layer_ids) else i
+                    ].mlp,
+                    "e_score_correction_bias",
+                    None,
+                )
+                for i in range(len(router_logits_list))
+            )
             seqwise_layer_losses = triton_sequence_wise_balance_loss(
                 router_logits_list=tuple(router_logits_list),
                 top_k=getattr(self.config, "token_top_k", 4),
                 seq_lengths=seq_lengths,
                 padding_len=0,
                 score_func=score_func,
+                e_score_correction_bias_list=seqwise_router_biases,
             )
             if seqwise_layer_losses:
                 seq_wise_loss = seq_wise_loss_coeff * torch.stack(seqwise_layer_losses).mean()
@@ -1600,17 +1611,8 @@ class FlowMatchingV2(FlowMatchingV1):
                     num_experts = logits.shape[-1]
                     routing_probs = F.softmax(logits, dim=1, dtype=torch.float)
                     moe_block = self.qwenvl_with_expert.qwen_expert.model.layers[layer_id].mlp
-                    if hasattr(moe_block, "last_tokens_per_expert"):
-                        # Global (all-reduced), biased, true top-k load from the load-balance hook.
-                        counts = moe_block.last_tokens_per_expert.clone()
-                        if counts.sum() == 0:
-                            # Buffer not yet populated by the load-balance hook (first step
-                            # after run start / resume) -> skip this layer to avoid a spurious
-                            # has_dead_expert / min_load_ratio spike on the very first viz.
-                            continue
-                    else:
-                        _, selected = torch.topk(routing_probs, 1, dim=-1)
-                        counts = F.one_hot(selected.squeeze(-1), num_classes=num_experts).float().sum(dim=0)
+                    _, selected = torch.topk(routing_probs, 1, dim=-1)
+                    counts = F.one_hot(selected.squeeze(-1), num_classes=num_experts).float().sum(dim=0)
                     avg_load = counts.mean()
                     denom = avg_load.clamp(min=1e-9)
                     maxvio = (counts.max() - avg_load) / denom  # peak overload  (>=0, larger=worse)

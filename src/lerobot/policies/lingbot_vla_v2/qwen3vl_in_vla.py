@@ -40,7 +40,6 @@ def _qwen3vl_no_init_weights(self, module):
     return
 
 
-_Qwen3VLPreTrainedModel._init_weights = _qwen3vl_no_init_weights
 Qwen3VLPreTrainedModel = _Qwen3VLPreTrainedModel
 
 
@@ -131,7 +130,9 @@ class Qwen3VLVisionAttention(nn.Module):
             attn_output = torch.cat(attn_outputs, dim=1)
 
         attn_output = attn_output.reshape(seq_length, -1).contiguous()
-        attn_output = self.proj(attn_output)
+        # The flash fp32->bf16->fp32 round-trip above can leave attn_output in fp32
+        # while proj's weights are bf16; outside autocast that dtype mix raises.
+        attn_output = self.proj(attn_output.to(self.proj.weight.dtype))
         return attn_output
 
 
@@ -303,8 +304,14 @@ def forward_without_grid_thw(
 
     if pos_embeds is None or position_embeddings is None or cu_seqlens is None or max_seqlen is None:
         pos_embeds, position_embeddings, cu_seqlens, _, max_seqlen = self.preprcess_grid_thw(grid_thw)
-    if pos_embeds is None:
-        pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
+    else:
+        # Cached (precompute_grid_thw) metadata must match this batch's token
+        # stream; on a token-count mismatch, recompute from the current
+        # grid_thw instead. Sync-free shape check only — reading cu_seqlens[-1]
+        # here would force a host sync per chunk, which is exactly what the
+        # precompute path exists to avoid.
+        if pos_embeds.shape[0] != hidden_states.shape[0]:
+            pos_embeds, position_embeddings, cu_seqlens, _, max_seqlen = self.preprcess_grid_thw(grid_thw)
 
     hidden_states = hidden_states + pos_embeds
     seq_len, _ = hidden_states.size()
@@ -329,8 +336,16 @@ def forward_without_grid_thw(
     return hidden_states, deepstack_feature_lists
 
 
+_lingbot_qwen3vl_patch_applied = False
+
+
 def apply_lingbot_qwen3_vl_patch():
+    global _lingbot_qwen3vl_patch_applied
+    if _lingbot_qwen3vl_patch_applied:
+        return
+    _lingbot_qwen3vl_patch_applied = True
     logger.info("apply Qwen3-VL Lingbot patch")
+    _Qwen3VLPreTrainedModel._init_weights = _qwen3vl_no_init_weights
     hf_qwen3vl.Qwen3VLPreTrainedModel = Qwen3VLPreTrainedModel
     hf_qwen3vl.Qwen3VLTextDecoderLayer = Qwen3VLTextDecoderLayer
     hf_qwen3vl.Qwen3VLTextModel = Qwen3VLTextModel

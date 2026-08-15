@@ -193,28 +193,6 @@ class Normalizer:
         return unnormalized_data
 
 
-def resize_with_pad_item(img, width, height, pad_value=-1):
-    # assume no-op when width height fits already
-    if img.ndim != 3:
-        raise ValueError(f"(c,h,w) expected, but {img.shape}")
-
-    cur_height, cur_width = img.shape[1:]
-
-    ratio = max(cur_width / width, cur_height / height)
-    resized_height = int(cur_height / ratio)
-    resized_width = int(cur_width / ratio)
-    resized_img = F.interpolate(
-        img.unsqueeze(0), size=(resized_height, resized_width), mode="bilinear", align_corners=False
-    ).squeeze(0)
-
-    pad_height = max(0, int(height - resized_height))
-    pad_width = max(0, int(width - resized_width))
-
-    # pad on left and top of image
-    padded_img = F.pad(resized_img, (pad_width, 0, pad_height, 0), value=pad_value)
-    return padded_img
-
-
 def _visual_hw(visual: Tensor) -> tuple[int, int]:
     if visual.ndim == 3:
         return int(visual.shape[1]), int(visual.shape[2])
@@ -323,8 +301,16 @@ def prepare_images_on_device(image_processor, images: dict[str, Tensor], device)
     merge_size = image_processor.merge_size
     temporal_patch_size = image_processor.temporal_patch_size
     size = image_processor.size
-    min_pixels = size["shortest_edge"] if isinstance(size, dict) else size.shortest_edge
-    max_pixels = size["longest_edge"] if isinstance(size, dict) else size.longest_edge
+    size_min = size["shortest_edge"] if isinstance(size, dict) else size.shortest_edge
+    size_max = size["longest_edge"] if isinstance(size, dict) else size.longest_edge
+    # Prefer the processor's explicit pixel bounds when present; fall back to the
+    # size dict's shortest/longest edge otherwise.
+    min_pixels = getattr(image_processor, "min_pixels", None)
+    if min_pixels is None:
+        min_pixels = size_min
+    max_pixels = getattr(image_processor, "max_pixels", None)
+    if max_pixels is None:
+        max_pixels = size_max
     rescale_factor = image_processor.rescale_factor
     image_mean = image_processor.image_mean
     image_std = image_processor.image_std
@@ -469,6 +455,10 @@ def prepare_images(
                 if return_image_grid_thw and "image_grid_thw" in processed:
                     image_grid_thw_dict[key] = processed["image_grid_thw"]
             image_dict[key] = img
+    if not image_dict:
+        raise ValueError(
+            f"None of the configured camera keys are present in the observation; missing: {list(image_keys)}"
+        )
     for key in image_keys:
         if key in image_dict:
             img = image_dict[key]
