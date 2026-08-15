@@ -1,3 +1,8 @@
+> **This fork** hosts the accelerated LingBot-VLA 2.0 port for LeRobot: CUDA-graph inference
+> acceleration (final baked config, RTX 4090 numbers) and consumer-GPU (24GB) training recipes.
+> Start at [`src/lerobot/policies/lingbot_vla_v2/README.md`](src/lerobot/policies/lingbot_vla_v2/README.md).
+> Everything below is upstream LeRobot, unchanged.
+
 <p align="center">
   <img alt="LeRobot, Hugging Face Robotics Library" src="./media/readme/lerobot-logo-thumbnail.png" width="100%">
 </p>

@@ -74,6 +74,58 @@ The robot config maps dataset keys into the canonical LingBot slots. The norm-st
 used by the LingBot feature transform, so the saved LeRobot processor pipeline does not use
 the generic LeRobot normalizer/unnormalizer steps.
 
+## Training on consumer GPUs (24GB-class, measured)
+
+### Single 24GB card
+
+Both flags are mandatory:
+
+- `--policy.train_expert_only=true`
+- `--policy.gradient_checkpointing=true`
+
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is recommended. Measured: 22.0GB peak
+memory, batch size 1, ~0.7s/step.
+
+Full single-card command (validated end to end):
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True lerobot-train \
+  --dataset.repo_id=local/rebot_shakehands --dataset.root=/root/datasets/rebot_shakehands \
+  --dataset.streaming=false --policy.type=lingbot_vla_v2 \
+  --policy.pretrained_path=<converted_ckpt> \
+  --policy.robot_config_path=<robot_config.yaml> --policy.norm_stats_path=<norm_stats.json> \
+  --policy.dtype=bfloat16 --policy.optimizer_fused=true --policy.push_to_hub=false \
+  --policy.train_expert_only=true --policy.gradient_checkpointing=true \
+  --batch_size=1 --steps=10 --log_freq=1 --num_workers=4 \
+  --save_checkpoint=false --output_dir=<out> --job_name=smoke --wandb.enable=false
+```
+
+### 2x24GB with FSDP2
+
+Four requirements — missing any one of them fails the run:
+
+1. `train_expert_only=true`.
+2. The accelerate YAML must `auto_wrap` three layer classes, given as a comma-separated
+   string: `Qwen3VLVisionBlock,Qwen3VLTextDecoderLayer,Qwen2DecoderLayer`.
+3. `fsdp_offload_params=true`.
+4. The `policy()` call bug fixed on this branch (present upstream).
+
+Measured: ~23s/step (the offload cost). `cpu_ram_efficient_loading` must be turned off
+(accelerate bug). Full fine-tuning on 2x24GB is physically infeasible — the optimizer
+states alone are 96GB across 2 cards.
+
+### Rollout
+
+```bash
+lerobot-rollout --strategy.type=base --policy.path=<ckpt> --robot.type=<robot> \
+  --task="..." --fps=5 --duration=150 --play_sounds=false
+```
+
+The first chunk pays the compile/capture warmup (a cold inductor cache can take minutes),
+so keep `--duration` at 150s or above. Without a real robot, a third-party mock robot can
+be registered through the `register_third_party_plugins` mechanism; see the reference
+implementation in `bench/rollout_plugin/`.
+
 ## Adapting to a New Embodiment
 
 Fine-tuning on a robot the checkpoint was not converted for only requires two new assets —
@@ -149,6 +201,58 @@ policy.to("cuda").eval()
 For batched LeRobot observations, use `select_action`. For open-loop action chunks, use
 `predict_action_chunk`; it returns a `(batch, chunk_size, action_dim)` tensor after the
 policy postprocessing path has mapped canonical actions back to raw dataset action keys.
+
+## Inference acceleration
+
+Final config, measured on an RTX 4090. Every switch is baked into the converted
+checkpoint's `config.json`, so loading the checkpoint is enough — no CLI flags needed:
+
+| Config key | Value | Notes |
+| --- | --- | --- |
+| `attention_implementation` | `eager` | Joint attention in bf16. 8-17ms faster than `sdpa`: with the custom 2D mask, `sdpa` falls back to the math path, while `eager`'s pointwise ops get fused by inductor. ViT internals still use `sdpa`. |
+| `dtype` | `bfloat16` | |
+| `compile_predict_velocity` | `true` | `mode="max-autotune-no-cudagraphs"`, per-step scope. |
+| `compile_prefix` | `true` | |
+| `preprocess_device` | `cuda` | |
+| `precompute_grid_thw` | `true` | |
+| `use_cudagraph_denoise` | `true` | New switch, default `false` — see below. |
+| `num_steps` | `7` | |
+
+Steps vs. latency, measured with `cuda.Event` around policy-level `sample_actions` on an
+RTX 4090 with the config above:
+
+| `num_steps` | CUDA graph on | CUDA graph off | Gain |
+| ---: | ---: | ---: | ---: |
+| 4 | 108.5ms | 135.5ms | -27ms |
+| 7 | 130.9ms | 175.9ms | -45ms |
+| 10 | 153.0ms | 227.0ms | -74ms |
+
+Note: the 7-step 130.9ms matches the official README's 130ms claim numerically, but that
+claim is not reproducible from the public repo — it equals the official stack's pure GPU
+busy time (113.7ms) and requires an internal CUDA graph build.
+
+### `use_cudagraph_denoise`
+
+Captures the entire denoise loop into a single CUDA graph replay.
+
+- Zero numerical change — bitwise verified (`max|delta|=0`) across varying observations,
+  first call, `sdpa`/`eager`, and with/without compile.
+- The first call costs two extra warm-up + capture passes.
+- Observation shape changes automatically fall back to the plain loop (a warning is
+  logged).
+- CUDA only.
+
+Numerical validation discipline: any performance change must pass the bitwise-comparison
+template with fixed seed and fixed noise in `bench/` (the `e1_val.py` pattern).
+
+### RTC (Real-Time Chunking)
+
+RTC under `policies/rtc/` works on this branch. Measured equivalent reaction latency
+(30fps simulation): sync ~1.0-1.2s, async ~700ms, RTC ~580ms. Guidance overhead is only
++9.1% — LeRobot's `RTCProcessor` gradient path is an identity mapping, so with frozen
+parameters there is no extra backward. Two pitfalls: `LatencyTracker.max()` is
+monotonically increasing and should be replaced with a p95 window; gRPC async is not
+recommended (it oscillates under latency jitter).
 
 ## Tests
 
