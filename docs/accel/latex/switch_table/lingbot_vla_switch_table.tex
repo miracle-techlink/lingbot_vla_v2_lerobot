@@ -1,0 +1,142 @@
+% LingBot-VLA 2.0 优化开关表 + 逐项启动验证
+% 编译:tectonic -X compile lingbot_vla_switch_table.tex
+\documentclass[11pt]{ctexart}
+\input{cnreport-preamble}
+
+\renewcommand{\runningtitle}{LingBot-VLA 2.0 优化开关启动验证}
+\renewcommand{\reportdate}{2026 年 8 月 13 日}
+\renewcommand{\reportfooter}{accel-bench · TR-2026-08-13-SW}
+
+\begin{document}
+
+\reporthead{技术报告 · TR-2026-08-13-SW}{2026 年 8 月 13 日}
+{LingBot-VLA 2.0 优化开关表:逐项启动验证}
+{pr3967-combined 分支全部新增开关的默认值、作用与真机启动结果}
+{测试平台:8$\times$A100-80GB(liuyue 机) \quad 代码:lerobot pr3967-combined \quad 环境:conda lvla-lerobot}
+
+\begin{cnabstract}
+本文对 pr3967-combined 分支为 LingBot-VLA 2.0 引入的全部优化开关做\textbf{逐项真机启动验证}:
+训练开关经 \texttt{lerobot-train} 真实启动(steps=3、gpudad SO101 真实数据集),
+推理开关经 ckpt 加载与 \texttt{predict\_action\_chunk}(rollout 的策略路径),
+另设一臂完整复刻 rollout 加载方式(开关固化进 \texttt{config.json} 后 \texttt{from\_pretrained})。
+共 13 臂,\textbf{11 臂通过};两臂给出负面结论——\texttt{EFFICIENT\_ATTENTION} 后端直接无可用 kernel,
+\texttt{CUDNN\_ATTENTION} 能启动但第一个训练步梯度即 NaN。
+最终纪律一句话:\textbf{\texttt{sdpa\_backend} 整体不要设,自动后端是唯一安全且最优的选择}。
+\end{cnabstract}
+\keywords{LingBot-VLA 2.0;开关验证;lerobot-train;lerobot-rollout;SDPA 后端}
+
+\section{引言}
+本分支相对上游 PR \#3967 引入了一组训练/推理优化开关。开关表不能只靠读代码核对:
+\texttt{sdpa\_backend} 一类开关``能解析、能启动''与``训练可用''之间隔着真实的数值缺陷。
+本文回答的问题是:\textbf{每一个开关,真启动能不能起来?起来之后数值对不对?}
+
+\section{验证设置}
+验证矩阵驱动脚本 \texttt{bench/run\_switch\_smoke.sh},产物在 A100 侧
+\texttt{\textasciitilde/accel-bench/}\allowbreak\texttt{switch\_smoke/} 目录。权重为 robotwin 6B 转换 ckpt,
+数据集 gpudad SO101(993 段 / 132k 帧 / 3 相机 512$\times$512)。
+宿主机 GPU 0--3 被 LIBERO eval 占用,本矩阵全程跑在 GPU 4--7。
+
+\textbf{训练臂}(每臂独占一卡):\texttt{lerobot-train} 启动,steps=3、batch\_size=1、
+num\_workers=2、\texttt{save\_checkpoint=}\allowbreak\texttt{false},其余与手册标准命令一致。
+判据:exit 0 且 3 步 loss 有限、与对照组一致。
+
+\textbf{推理臂}:\texttt{bench/bench\_lingbot\_v2.py infer}(iters=3, warmup=1),
+即 \texttt{from\_pretrained} + 合成观测 + \texttt{predict\_action\_chunk}。
+I6 为 rollout 完整路径复刻:五个推理开关固化进 \texttt{config.json} 副本后从头加载。
+
+\section{训练开关验证结果}
+
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{训练开关逐项启动验证(\texttt{lerobot-train},steps=3,B=1,A100-80GB 单卡)}
+\begin{tabular}{@{}p{4.6cm}lp{5.9cm}@{}}
+\toprule
+开关(\texttt{-{}-policy.} 前缀) & 默认 & 启动验证与结论 \\
+\midrule
+\texttt{optimizer\_fused} & false &
+  \textbf{通过}。3 步 loss 0.429/0.446/2.445,与对照组一致;fused AdamW 此前 e2e 实测 \upgood{-5.4\%} step 时间 \\
+\texttt{gradient\_checkpointing} & false &
+  \textbf{通过}。loss 与对照组逐位一致;但 B$\le$4 时 \downbad{+38\%} 慢,显存够就别开 \\
+\texttt{moe\_dense\_max\_tokens} & 512 &
+  \textbf{通过}。=0 回退逐专家循环路径可用(loss 数值路径不同属预期);默认开即优化后状态 \\
+\texttt{attention\_implementation} & sdpa &
+  \textbf{保持 sdpa}。eager+bf16 经 300 步真实数据 A/B:loss 曲线等价(max $|\Delta| \approx 0.012$)
+  但稳态 +2.2\% 慢、+2.9GB 显存、B=4 OOM——合成 bench 上的 eager 优势是相同样本平铺的假象 \\
+\texttt{sdpa\_backend=}\newline \texttt{EFFICIENT\_ATTENTION} & null &
+  \downbad{起不来}。\texttt{RuntimeError: No available kernel}——mem-efficient 后端不支持本模型
+  bool mask + GQA + head\_dim 128 的组合 \\
+\texttt{sdpa\_backend=}\newline \texttt{CUDNN\_ATTENTION} & null &
+  \downbad{能启动但训练即毁}。exit 0、前向正常,但 step 1 梯度 \texttt{grdn:nan},
+  step 2 起 loss=nan;单步梯度对照 1222/1267 个梯度张量 NaN \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+对照组(T0)3 步 loss 为 0.429/0.446/2.448;\texttt{optimizer\_fused} 与
+\texttt{gradient\_checkpointing} 两臂 loss 逐位贴合,数值等价性在真训练路径上再确认。
+\texttt{CUDNN\_ATTENTION} 是最危险的一类失败:进程正常退出、前向 loss 正常,
+只有多步训练才暴露梯度 NaN——这正是本分支把它列为禁用项的直接证据。
+
+\section{推理开关验证结果}
+
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{推理开关逐项启动验证(bench infer 臂,I6 为固化后 rollout 加载路径)}
+\begin{tabular}{@{}p{4.6cm}lp{5.9cm}@{}}
+\toprule
+开关 & 默认 & 启动验证与结论 \\
+\midrule
+\texttt{compile\_predict\_velocity} & false &
+  \textbf{通过}(I2)。编译需 $\ge$3 次 warmup,冒烟 warmup=1 的均值被编译时间污染,稳态看 I6 \\
+\texttt{compile\_predict\_velocity}\newline \texttt{\_mode} & default &
+  \textbf{通过}(随 I2/I3/I6)。锁定 \texttt{max-autotune-no-cudagraphs} \\
+\texttt{compile\_prefix} & false &
+  \textbf{通过}(I3 全套栈)。需先开 \texttt{compile\_predict\_velocity} \\
+\texttt{preprocess\_device=cuda} & null &
+  \textbf{通过}(I1)。预处理 519.4 $\to$ 198.0 ms(\upgood{-61.9\%});仅推理,训练自动留 CPU \\
+\texttt{num\_steps} & 10 &
+  \textbf{通过}(I4,steps=5)。锁定 10;改小线性降时延但掉动作质量 \\
+\texttt{moe\_dense\_max\_tokens=0} & 512 &
+  \textbf{通过}(I5)。关闭后 911.2 $\to$ 1129.5 ms(\downbad{+24.0\%}),符合回退预期 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+对照基线(I0,全默认 eager + CPU 预处理):总时延 911.2 ms,其中预处理 519.4 ms。
+
+\textbf{I6:rollout 完整加载路径。}将
+\texttt{compile\_predict\_velocity} + \texttt{max-autotune-no-cudagraphs} + \texttt{compile\_prefix} + \texttt{preprocess\_device=cuda} + \texttt{num\_steps=10}
+固化进 ckpt 的 \texttt{config.json} 后 \texttt{from\_pretrained}:
+iter0 43.7 s(一次性 inductor 编译),iter1 12.5 s,稳态 \textbf{258.0 ms},
+动作张量 $(1,50,14)$ 数值有限。\textbf{手册 §3a 的固化流程端到端成立},
+rollout 前做一次即可。
+
+\section{讨论}
+两个负面结果都来自真启动而非代码阅读:\texttt{EFFICIENT\_ATTENTION} 在加载后第一次
+attention 调用即报无可用 kernel;\texttt{CUDNN\_ATTENTION} 的 NaN 只在 backward 出现,
+前向 parity 检查(rel diff $3.3\times10^{-7}$)完全无法发现。
+后端切换类开关的验收门槛因此定为\textbf{多步 e2e 训练},单步前向对比不足为据。
+\texttt{sdpa\_backend} 保留在配置里仅供调试,生产命令一律不写。
+
+另有一次反向教训:合成 bench(相同样本平铺、序列短且定长)曾显示 eager+bf16 训练
+更快更省(-6.9\%、-10GB),据此一度准备改默认;300 步真实数据集 A/B(2026-08-14,
+loss 曲线完全等价)推翻了它——真实变长序列下 eager 稳态 +2.2\% 慢、+2.9GB、B=4 OOM。
+\textbf{bench 结论迁移到真实训练前必须用真实数据复核},sdpa+bf16 维持推荐默认。
+
+\section{结论}
+13 臂矩阵,11 臂通过、2 臂给出禁用级证据。推荐组合不变:
+\textbf{训练}全默认 + \texttt{optimizer\_fused=}\allowbreak\texttt{true},单卡 B=3 / 多卡 B=2 每卡;
+\textbf{推理}五开关固化进 \texttt{config.json}(e2e 436 ms @ robotwin 3 相机,
+约 300 ms @ 单相机)。\textbf{\texttt{sdpa\_backend} 一律不设。}
+
+\section*{参考与产物}
+\begin{enumerate}[label={[\arabic*]},leftmargin=2.2em]
+\item 验证矩阵驱动与日志:\texttt{bench/run\_switch\_smoke.sh};\\
+A100 侧日志目录 \texttt{\textasciitilde/accel-bench/switch\_smoke/}。
+\item 开关实现 commit:\texttt{e23a03f5}\allowbreak、\texttt{4ce46ede}\allowbreak、\texttt{c756a657}
+(分别为 \texttt{sdpa\_backend} 与 fused AdamW、bench 臂扩展)。
+\item cuDNN 梯度 NaN 单步对照:\texttt{bench/check\_cudnn\_}\allowbreak\texttt{grads.py}(commit \texttt{217a848f})。
+\item 配套命令手册:\texttt{docs/accel/}\allowbreak\texttt{lingbot\_vla\_train\_rollout\_commands.md}。
+\end{enumerate}
+
+\end{document}

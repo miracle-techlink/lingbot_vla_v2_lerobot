@@ -1,0 +1,3 @@
+[08/17 20:59:40.080902][info][1905139][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 21:36:13.341151][info][1945966][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 21:43:05.443470][info][1951614][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)

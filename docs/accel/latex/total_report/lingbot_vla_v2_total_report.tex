@@ -1,0 +1,239 @@
+% LingBot-VLA 2.0 优化报告(精简结构版)
+% 编译:tectonic -X compile lingbot_vla_v2_total_report.tex
+\documentclass[11pt]{ctexart}
+\input{cnreport-preamble}
+
+\renewcommand{\runningtitle}{LingBot-VLA 2.0 优化全景报告}
+\renewcommand{\reportdate}{2026 年 8 月 14 日}
+\renewcommand{\reportfooter}{accel-bench · TR-2026-08-14-ALL}
+
+\begin{document}
+
+\reporthead{综合技术报告 · TR-2026-08-14-ALL}{2026 年 8 月 14 日}
+{LingBot-VLA 2.0 lerobot 移植与加速:全景报告}
+{训练 / 推理最终配置、叠加工程方案与全部实测数字}
+{代码:lerobot pr3967-combined \quad 主测平台:8$\times$A100-80GB \quad 辅助:GB10 / 4$\times$4090D(待测)}
+
+\begin{quotebox}
+\textbf{一句话定位(2026-08-14 锁定,sdpa 全程保留,从未被否决):}\\
+\textbf{训练} = sdpa(自动后端)+ bf16 + 稠密双 GEMM MoE(默认 512 阈值)\newline
+\hspace*{1.2em}+ fused AdamW(\texttt{optimizer\_fused=true})+ 不开 grad-ckpt;
+单卡 B=3 / DDP 每卡 B=2。\\
+\textbf{推理} = sdpa + bf16 + \texttt{compile\_predict\_velocity}\newline
+\hspace*{1.2em}(max-autotune-\newline \hspace*{1.2em}no-cudagraphs)+ \texttt{compile\_prefix}
++ \texttt{preprocess\_device=cuda} + \texttt{num\_steps=10},
+一次性 bake 进 ckpt 的 config.json,rollout 只需 \texttt{-{}-policy.path}。
+\end{quotebox}
+
+\noindent 工作对象:robbyant/lingbot-vla-v2 官方仓与 huggingface/lerobot PR \#3967 移植版
+(本地分支 \texttt{pr3967-combined})。全部数字为真实 6B ckpt 实测;主测时宿主机有
+LIBERO eval 争抢(load 21--57),同条件前后对比有效,绝对值偏保守,干净机更快。
+口径:推理 e2e = 预处理 + model forward(vision+prefix+10 步去噪)+ unapply;
+训练 e2e = fwd + bwd + clip + optimizer.step。
+推理 workload A = robotwin 3 相机 480$\times$640;B = SO101 单相机。
+训练数据集 = gpudad SO101(993 段 / 132k 帧 / 3 相机 512$\times$512)。
+
+\section{推理}
+
+\subsection{叠加工程方案(按落地顺序)}
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{推理优化栈:每一项为什么做、怎么起效、实测结果(A100)}
+\begin{tabular}{@{}p{2.9cm}p{3.4cm}p{4.3cm}p{3.6cm}@{}}
+\toprule
+方案 & 原因 & 原理 & 结果 \\
+\midrule
+sdpa + bf16;去噪循环不变量外提;MoE 去同步 &
+PR 基线 eager,每步去噪重复算不变量、MoE 有隐式同步 &
+fused attention kernel;不变量提到循环外;去掉 host 端同步 &
+1039.5 $\to$ 951.9 ms(\upgood{-8.4\%}) \\
+\addlinespace
+\texttt{compile\_predict\_}\newline \texttt{velocity}\newline(max-autotune-\newline no-cudagraphs) &
+10 步去噪 = 10 次小图发射,launch 开销主导 &
+torch.compile 把去噪步骤融成整图 &
+$\to$ 699.5 ms(\upgood{-32.7\%}) \\
+\addlinespace
+稠密双 GEMM MoE\newline(\texttt{moe\_dense\_}\newline \texttt{max\_tokens=512}) &
+小 token 数下 per-expert 循环 kernel 发射多、GEMM 利用率低 &
+token 数 $\le$512 时改走两次大 GEMM 的稠密等价计算 &
+robotwin 967.4 $\to$ +compile \textbf{398.5 ms}(\upgood{-73.3\%} vs eager 基线);loss 一致到 $9\times10^{-7}$ \\
+\addlinespace
+\texttt{compile\_prefix}(C3) &
+vision+prefix 每次推理重算且未编译 &
+prefix KV fill 一并编译(model 口径) &
+\upgood{-20\%}(253--269 ms 区间) \\
+\addlinespace
+\texttt{preprocess\_device}\newline\texttt{=cuda}(C4) &
+CPU 预处理占 e2e 近一半(668 ms / 1705 ms) &
+图像 resize/normalize 移到 GPU,预处理 \upgood{-62\%} &
+e2e \textbf{约 300 ms}(SO101,全程 \upgood{-79\%}) \\
+\addlinespace
+bake 固化五开关 &
+推理开关走 CLI 易漏、训练侧又必须是默认关 &
+写进 ckpt \texttt{config.json},\texttt{from\_pretrained} 自动生效 &
+rollout 零 flag;一次性编译 43.7 s 后稳态 258 ms \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+保真度(LIBERO drift vs fp32 参考,阈值 2\%):bf16 0.66--0.73\%、dense MoE on/off
+0.76\%、C3 0.69\%、C4 0.66\%——全部同量级,无劣化。
+
+\subsection{实验结果}
+\begin{table}[htbp]
+\centering\small
+\caption{推理:官方 upstream vs 本分支(同权重,robotwin 3 相机,10 步去噪)}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+配置 & e2e (ms) & 预处理 & model \\
+\midrule
+官方 eager(README 默认) & 1705.0 & 668.1 & 1020.7 \\
+官方 use\_compile & 1113.0 & 752.3 & 344.2 \\
+\textbf{本分支优化栈} & \textbf{436.6} & 147.8 & \textbf{288.8} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+e2e 加速 \textbf{3.9$\times$}(对 eager)/ \textbf{2.55$\times$}(对 compile);
+model-only 3.53$\times$/1.19$\times$。LIBERO 真实帧路径 293 ms,干净机估算约 250 ms。
+官方 README 的 130 ms@4090D claim 在 A100 无法复现(最优 model-only 344 ms),
+大概率是 sample\_actions 的 print 计时口径;4$\times$4090D 实测进行中,结果补录。
+
+\begin{table}[htbp]
+\centering\small
+\caption{推理 attention 消融(锁定栈内,compile+prefix+GPU 预处理,iters=10)}
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+组合 & e2e (ms) & $\Delta$ & 结论 \\
+\midrule
+\textbf{sdpa + bf16(推荐)} & \textbf{252.9} & \dimtext{—} & 推荐 \\
+eager + bf16 & 276.8 & \downbad{+9.4\%} & 慢 \\
+eager + fp32(上游原始) & 251.9 & \dimtext{-0.4\%(噪声内)} & compile 下不掉速;训练慢 \\
+sdpa + fp32 & 289.7 & \downbad{+14.5\%} & 最差,谁也别用 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{训练}
+
+\subsection{显存账本(决定一切的前提)}
+可训练 5.81B / 冻结 0.42B。固定态 = bf16 参数 11.6GB + 梯度 10.8GB
++ \textbf{AdamW m+v fp32 43.3GB(54\%)}= \textbf{65.7GB};激活约 10GB/样本。
+optimizer 状态才是大头,压激活是错杠杆。
+
+\subsection{叠加工程方案}
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{训练优化栈:每一项为什么做、怎么起效、实测结果(A100-80GB)}
+\begin{tabular}{@{}p{2.9cm}p{3.4cm}p{4.3cm}p{3.6cm}@{}}
+\toprule
+方案 & 原因 & 原理 & 结果 \\
+\midrule
+稠密双 GEMM MoE & 同推理,per-expert 循环在训练 batch 下同样低效 & 双 GEMM 稠密等价 & B=4 fwdbwd 2807.1 $\to$ 1501.3 ms(\upgood{-46.5\%}),loss 一致到 $9\times10^{-7}$ \\
+\addlinespace
+fused AdamW\newline(\texttt{optimizer\_fused}\newline\texttt{=true}) & 参数逐个 python 循环更新 & 单 kernel 融合 & \upgood{-5.4\%},loss 逐位一致 \\
+\addlinespace
+sdpa + bf16\newline(不换 eager) & bench 曾显示 eager 快 6.9\% 省 10GB & bench 是相同样本平铺的假象;真实变长序列下 mem-efficient sdpa 更优 & 300 步真实 A/B:sdpa \textbf{0.978 s}/65.7GB vs eager 0.999 s/68.5GB,eager B=4 OOM \\
+\addlinespace
+不开 grad-ckpt & 省的是不缺钱的激活 & 重算换显存,固定态 65.7GB 纹丝不动 & +38\% 慢,否决 \\
+\addlinespace
+batch 选择 & 80GB 装得下多少激活 & 65.7GB 固定 + $\sim$10GB/样本 & 单卡 B=3(72.0GB);DDP allreduce +11GB/卡 $\Rightarrow$ 每卡 B=2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{实验结果}
+\begin{table}[htbp]
+\centering\small
+\caption{单卡训练吞吐排序(e2e = fwd+bwd+clip+step,robotwin 3 相机)}
+\begin{tabular}{@{}lrrrl@{}}
+\toprule
+组合 & step (ms) & samples/s & 峰值显存 & 结论 \\
+\midrule
+\textbf{B=3 bf16 fused(推荐)} & \textbf{1509.7} & \textbf{1.99} & 72.0GB & \textbf{冠军} \\
+B=4 + 8bit AdamW(bnb) & 2159.9 & 1.85 & 73.5GB & 可行但更慢 \\
+B=2 fused & 1137.3 & 1.76 & \dimtext{—} & 基线 \\
+B=4 + grad-ckpt & \dimtext{—} & \dimtext{更低} & 28.7GB & +38\% 慢,否决 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+e2e 总收益:PR 原版 B=2 2378.1 ms $\to$ foreach 1202.0 $\to$ \textbf{fused 1137.3 ms}
+(\upgood{-52\%},2.09$\times$),三者 loss 0.528622 一致到 $10^{-6}$。
+
+多卡(社区标准 \texttt{accelerate launch} + \texttt{lerobot-train},
+\texttt{batch\_size} 为每卡语义):1 卡 1.97 s/step $\to$ 2 卡 1.00 s(4.0 samples/s)
+$\to$ 4 卡 1.00 s(\textbf{8.0 samples/s}),2$\to$4 完美线性。
+30k 步:单卡 B=3 约 12.6 h,4 卡约 \textbf{8.3 h}。
+
+\begin{table}[htbp]
+\centering\small
+\caption{训练 attention 长训 A/B(300 步,gpudad 真实数据,2026-08-14)}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+臂 & updt\_s 稳态 & 峰值显存 & loss 曲线 \\
+\midrule
+\textbf{LA sdpa+bf16 B=3} & \textbf{0.978} & \textbf{65.7GB} & 完全等价 \\
+LB eager+bf16 B=3 & 0.999(\downbad{+2.2\%}) & 68.5GB(\downbad{+2.9GB}) & (max $|\Delta|\approx0.012$) \\
+LC eager+bf16 B=4 & OOM & 79.3/80GB & bench 说能跑,真实不行 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+对官方 upstream 训练:官方单卡 80GB \textbf{完全跑不了}(muon fp32 master+动量
+约 74GB,micro=2 + grad-ckpt 仍 OOM,官方设计为 32 卡 fsdp2);官方 4 卡 fsdp2
+micro=2/卡(global 8)稳态 2.999 s/step = 0.67 samples/s/GPU;
+本分支单卡 2.35 samples/s(fwd+bwd)$\approx$ 官方 per-GPU 吞吐的 \textbf{3.5$\times$}。
+口径声明:官方含 MoGe/DINO-video 蒸馏前向支线,移植版没有该开销。
+
+\section{负面结果(全部被实测否决的路)}
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{否决清单:不是 sdpa,是这些东西}
+\begin{tabular}{@{}p{4.6cm}p{9.8cm}@{}}
+\toprule
+被否决项 & 证据 / 原因 \\
+\midrule
+显式设 \texttt{sdpa\_backend}(任何值) &
+CUDNN:bf16+bool mask+GQA 下 backward 1222/1267 梯度 NaN,step 1 即 \texttt{grdn:nan}(前向 parity 完全正常,不足为据);
+EFFICIENT:\texttt{No available kernel}\\
+eager 训练 & bench 假象(相同样本平铺);300 步真实 A/B:+2.2\% 慢、+2.9GB、B=4 OOM \\
+\texttt{attention\_fp32} & +8--14\% 慢,数值无收益 \\
+fp16 推理 & launch-bound 无收益(294.7 vs bf16 278.9 ms)且 LIBERO drift 3.33\% 超阈值 \\
+flex\_cached 训练 & +75\% 慢 \\
+grad-ckpt(B$\le$4) & +38\% 慢,省的是不缺钱的显存 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{最终结论}
+\begin{quotebox}
+\textbf{训练}:sdpa(自动后端)+ bf16 + 稠密 MoE + fused AdamW + 不开 grad-ckpt,
+单卡 B=3(1.99 samples/s,72GB)/ DDP 每卡 B=2(4 卡 8.0 samples/s,30k 步约 8.3 h)。
+相对 PR 原版 \textbf{2.09$\times$},相对官方 per-GPU \textbf{3.5$\times$}。\\
+\textbf{推理}:sdpa + bf16 + compile(max-autotune-no-cudagraphs)+ compile\_prefix
++ GPU 预处理 + num\_steps=10,bake 进 ckpt。相对官方 eager \textbf{3.9$\times$}
+(1705.0 $\to$ 436.6 ms),SO101 单相机约 300 ms。
+\end{quotebox}
+
+配套文档(均在 \texttt{docs/accel/}):
+\begin{itemize}[itemsep=0pt,topsep=1pt,parsep=0pt]
+\item 操作手册:\texttt{lingbot\_vla\_train\_rollout\_commands.md}
+(lerobot-train / lerobot-rollout 命令全文);
+\item 开关逐项启动验证(13 臂,11 通过):\texttt{lingbot\_vla\_switch\_table.pdf};
+\item reBot B601 实操:\texttt{lingbot\_vla\_rebot\_guide.pdf};
+\item 社区英文 quickstart:\newline
+\texttt{lingbot\_vla\_v2\_community\_quickstart.md}。
+\end{itemize}
+
+\section{已知边界与后续项}
+\begin{itemize}[itemsep=0pt,topsep=1pt,parsep=0pt]
+\item 全部绝对时延为污染环境(load 21--57)实测,干净机更快;相对结论不受影响。
+\item 8 卡 DDP 数字为 2/4 卡线性外推,真 8 卡验证待 GPU 0--3 释放。
+\item 训练侧进一步候选:compile 训练整图(-10\~20\%,攻坚)、fsdp2 固定态分片(24GB 卡必需)。
+\item 4$\times$4090D 实测(官方 claim 平台)进行中,结果补录。
+\end{itemize}
+
+\paragraph{参考与产物} 分支 \texttt{pr3967-combined}(关键 commit:\allowbreak{}\texttt{f2ff2ca5} 稠密 MoE、\texttt{569929b8} C3、\texttt{21ef4187} C4、\texttt{e23a03f5} sdpa\_backend+fused);A100 数据目录 \texttt{\textasciitilde/accel-bench/}(\texttt{train\_e2e/}、\texttt{switch\_smoke/}、\texttt{long\_ab/} 等);备份 \texttt{\textasciitilde/accel-bench/backups/}(git bundle + STATE.md)。
+
+\end{document}

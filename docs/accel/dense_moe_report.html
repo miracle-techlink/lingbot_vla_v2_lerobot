@@ -1,0 +1,380 @@
+<title>稠密双 GEMM MoE 技术报告</title>
+<style>
+  :root {
+    --ground: #EDEEF1;
+    --paper: #FBFCFD;
+    --ink: #1B2431;
+    --ink-soft: #44505F;
+    --ink-faint: #6B7889;
+    --accent: #0E5FA8;
+    --accent-ink: #0A4A82;
+    --rule: #C9CFD8;
+    --rule-strong: #8E99A8;
+    --good: #0E7A4D;
+    --warn: #B45309;
+    --chip: #EEF3F9;
+    --code-bg: #F0F2F5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0D1117;
+      --paper: #141A23;
+      --ink: #DCE4EF;
+      --ink-soft: #A8B4C4;
+      --ink-faint: #7E8B9C;
+      --accent: #5EA9E8;
+      --accent-ink: #8CC2F0;
+      --rule: #2A3542;
+      --rule-strong: #46536;
+      --rule-strong: #46536A;
+      --good: #4CC38A;
+      --warn: #E8A04C;
+      --chip: #1A2432;
+      --code-bg: #1A212C;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0D1117;
+    --paper: #141A23;
+    --ink: #DCE4EF;
+    --ink-soft: #A8B4C4;
+    --ink-faint: #7E8B9C;
+    --accent: #5EA9E8;
+    --accent-ink: #8CC2F0;
+    --rule: #2A3542;
+    --rule-strong: #46536A;
+    --good: #4CC38A;
+    --warn: #E8A04C;
+    --chip: #1A2432;
+    --code-bg: #1A212C;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: Georgia, "Times New Roman", "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif;
+    line-height: 1.75;
+    margin: 0;
+    padding: 2.5rem 1rem 4rem;
+  }
+  .paper {
+    max-width: 760px;
+    margin: 0 auto;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    padding: 3.2rem 3.4rem 3rem;
+  }
+  @media (max-width: 700px) { .paper { padding: 2rem 1.2rem; } }
+
+  .report-kicker {
+    font-family: "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: flex;
+    justify-content: space-between;
+    border-bottom: 2px solid var(--ink);
+    padding-bottom: 0.5rem;
+  }
+  h1 {
+    font-family: "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+    font-size: 1.62rem;
+    line-height: 1.35;
+    font-weight: 700;
+    text-wrap: balance;
+    margin: 1.4rem 0 0.6rem;
+  }
+  .subtitle {
+    font-size: 1.02rem;
+    color: var(--ink-soft);
+    margin: 0 0 0.9rem;
+  }
+  .byline {
+    font-family: "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+    font-size: 0.8rem;
+    color: var(--ink-faint);
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 1.1rem;
+    margin-bottom: 1.6rem;
+  }
+  .abstract {
+    margin: 0 1.2rem 1.8rem;
+    font-size: 0.93rem;
+    color: var(--ink-soft);
+  }
+  .abstract .lbl {
+    font-family: "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+    font-weight: 700;
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    color: var(--ink);
+  }
+  .keywords {
+    margin: -1rem 1.2rem 2rem;
+    font-size: 0.85rem;
+    color: var(--ink-faint);
+  }
+  .keywords .lbl { font-weight: 700; color: var(--ink-soft); }
+
+  h2 {
+    font-family: "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+    font-size: 1.14rem;
+    font-weight: 700;
+    margin: 2.4rem 0 0.8rem;
+    padding-top: 0.9rem;
+    border-top: 1px solid var(--rule);
+    text-wrap: balance;
+  }
+  h2 .no { color: var(--accent); margin-right: 0.5rem; }
+  h3 {
+    font-family: "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+    font-size: 0.95rem;
+    font-weight: 700;
+    margin: 1.6rem 0 0.4rem;
+  }
+  h3 .no { color: var(--accent); margin-right: 0.4rem; font-weight: 600; }
+  p { margin: 0.65rem 0; }
+  strong { color: var(--ink); }
+
+  .eq {
+    display: block;
+    overflow-x: auto;
+    text-align: center;
+    font-size: 0.98rem;
+    margin: 0.9rem 0;
+    padding: 0.55rem 0.4rem;
+    white-space: nowrap;
+  }
+  .eq .tag { float: right; color: var(--ink-faint); font-size: 0.85rem; }
+  var, .m { font-style: italic; }
+  sub, sup { font-size: 0.72em; }
+
+  .tbl-wrap { overflow-x: auto; margin: 1.1rem 0 1.3rem; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+    font-size: 0.83rem;
+    font-variant-numeric: tabular-nums;
+  }
+  caption {
+    caption-side: top;
+    text-align: left;
+    font-size: 0.8rem;
+    color: var(--ink-faint);
+    padding-bottom: 0.45rem;
+    font-family: Georgia, "Noto Serif SC", serif;
+  }
+  caption b { color: var(--ink-soft); }
+  thead th {
+    border-top: 2px solid var(--ink);
+    border-bottom: 1px solid var(--rule-strong);
+    text-align: left;
+    padding: 0.42rem 0.6rem;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 0.38rem 0.6rem;
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 2px solid var(--ink); }
+  td.num, th.num { text-align: right; }
+  td .good { color: var(--good); font-weight: 700; }
+  td .warn { color: var(--warn); font-weight: 700; }
+  td .dim { color: var(--ink-faint); }
+
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    padding: 0.9rem 1rem;
+    overflow-x: auto;
+    font-family: "SF Mono", "JetBrains Mono", Consolas, monospace;
+    font-size: 0.78rem;
+    line-height: 1.55;
+  }
+  code {
+    font-family: "SF Mono", "JetBrains Mono", Consolas, monospace;
+    font-size: 0.82em;
+    background: var(--code-bg);
+    padding: 0.08em 0.3em;
+  }
+  pre code { background: none; padding: 0; }
+
+  .fig {
+    border: 1px solid var(--rule);
+    background: var(--chip);
+    padding: 1rem 1.1rem;
+    margin: 1.2rem 0;
+    font-family: "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+  }
+  .fig .cap {
+    font-family: Georgia, "Noto Serif SC", serif;
+    font-size: 0.8rem;
+    color: var(--ink-faint);
+    margin-top: 0.7rem;
+  }
+  .pipe { display: flex; align-items: stretch; gap: 0.4rem; flex-wrap: wrap; }
+  .pipe .st {
+    flex: 1 1 0;
+    min-width: 92px;
+    border: 1px solid var(--rule-strong);
+    background: var(--paper);
+    padding: 0.45rem 0.5rem;
+    font-size: 0.72rem;
+    line-height: 1.45;
+  }
+  .pipe .st b { display: block; font-size: 0.76rem; }
+  .pipe .st.hot { border-color: var(--warn); }
+  .pipe .st.cool { border-color: var(--good); }
+  .pipe .arr { align-self: center; color: var(--ink-faint); }
+
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--chip);
+    padding: 0.7rem 1rem;
+    margin: 1.1rem 0;
+    font-size: 0.9rem;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: 0.3rem 0; }
+  .refs { font-size: 0.82rem; color: var(--ink-soft); }
+  .refs li { margin: 0.25rem 0; }
+</style>
+
+<div class="paper">
+
+<div class="report-kicker"><span>技术报告 · TR-2026-08</span><span>2026 年 8 月 12 日</span></div>
+
+<h1>稠密即更快：小 Token 规模下稀疏 MoE 的双 GEMM 纯 PyTorch 实现</h1>
+<p class="subtitle">以 LingBot-VLA 2.0 动作专家为案例的测量、方法与前后对比实验</p>
+<div class="byline">LingBot-VLA 加速工作组 · 测试平台:NVIDIA A100-SXM4-80GB · 代码分支 <code>lingbot-v2-accel</code>(基于 lerobot PR #3967)</div>
+
+<div class="abstract">
+<span class="lbl">摘要</span> — 流匹配 VLA 策略的去噪循环把稀疏 MoE 专家置于一种极端工况:每次前向只有 51 个 token,却要经过 36 层 × 10 步共 360 次 MoE 调用。本文的测量表明,此时 MoE 的瓶颈既非 FLOPs 也非显存带宽,而是 <b>kernel 发射开销与 torch.compile 图断裂</b>:A100 上 MoE 的真实 GPU 忙时仅 26.6 ms/次推理,墙钟却付出 300 ms 以上。据此我们把 top-k 路由 MoE 重写为<b>两个普通稠密 GEMM</b>:将全部 32 个专家的 gate/up 权重按专家维拼接为单个矩阵,一次 GEMM 算出全部专家的中间激活;top-k 路由权重 one-hot 化后直接折叠进中间激活,使第二个(down)GEMM 的归约天然完成"按权重合并专家"——未选中的专家权重恒为 0,因此与精确路由<b>代数等价</b>。该实现纯 PyTorch、静态形状、可微分,且可被 dynamo 整图追踪。A100 实测:推理(与 compile 联用)1489.1 → 398.5 ms(<b>-73.2%</b>);训练 B=4 单步 2807.1 → 1501.3 ms(<b>-46.5%</b>);数值差异为浮点重结合级别(动作相对差 0.78%,训练 loss 相对差 9×10⁻⁷)。在非编译回退路径上,稠密实现(228.4 ms)同样快于手写 Triton grouped-GEMM(365.7 ms)。
+</div>
+<p class="keywords"><span class="lbl">关键词:</span>Mixture-of-Experts;视觉-语言-动作模型;流匹配;kernel 发射开销;torch.compile;纯 PyTorch 算子</p>
+
+<h2><span class="no">1</span>引言</h2>
+<p>LingBot-VLA 2.0(lerobot PR #3967)采用 pi0 式双流架构:Qwen3-VL-4B 作为视觉-语言骨干,并联一个 36 层、hidden 768 的 Qwen2 动作专家;动作通过流匹配(flow matching)生成,一次推理执行 10 步 Euler 去噪,每步将 51 个 suffix token(state 1 + action chunk 50)送过动作专家。动作专家的<b>全部 36 层</b>都是稀疏 MoE(32 专家、top-4 路由、专家中间维 512,另有共享专家 704)。</p>
+<p>这意味着一次推理包含 <var>36 × 10 = 360</var> 次 MoE 前向,而每次前向仅 51 个 token、204 条路由。MoE 文献中的经典优化目标——大 batch 下的专家并行与显存容量——在此完全错位:单次调用的计算量只有约 0.48 GFLOP,A100 上纯 GEMM 时间以微秒计。本文要回答的问题是:<b>在这种"小 T、高频次"工况下,MoE 的正确实现形态是什么?</b>答案与直觉相反:把 32 个专家<b>全部稠密计算</b>再按权重丢弃,比精确路由更快——因为路由机制本身(argsort、gather、scatter、per-expert 启动)的成本已经超过了它省下的 FLOPs。</p>
+
+<h2><span class="no">2</span>动机:测量先行</h2>
+<p>对原版实现(lerobot PR 未修改版,attention 为 eager + fp32)与中间优化版(sdpa + bf16 + 循环不变量外提 + 去 sync)在 A100 上做分段计时与 profiler 核级归因,得到三个关键事实:</p>
+<div class="tbl-wrap"><table>
+<caption><b>表 1.</b> 去噪路径的结构性测量(每次推理;GPU 忙时为 profiler 核函数时间求和)</caption>
+<thead><tr><th>指标</th><th class="num">数值</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>MoE GPU 忙时</td><td class="num">26.6 ms</td><td><code>_grouped_gemm_kernel</code> 求和,360 次调用</td></tr>
+<tr><td>MoE 墙钟(非编译)</td><td class="num">365.7 ms</td><td>同一个 MoE,发射开销占 93%</td></tr>
+<tr><td>整图 GPU 忙时(compile 后)</td><td class="num">225.3 ms</td><td>墙钟 ~700 ms,其余为 launch 间隙</td></tr>
+<tr><td>kernel 总数(compile 后)</td><td class="num">22,172</td><td>≈61 个/层·步,图被切碎</td></tr>
+<tr><td>dynamo graph break</td><td class="num">360 / 次推理</td><td>每个 MoE 的手写 Triton 内核一个断点</td></tr>
+</tbody>
+</table></div>
+<p>结论清晰:① MoE 的 GEMM 本身几乎不耗时;② 手写 Triton grouped-GEMM 对 dynamo 是黑盒,每个 MoE 层强制一次图断裂,inductor 只能融合断点之间的碎片;③ 因此墙钟的 ~70% 是 kernel 发射间隙。<b>优化的正确目标不是"更快的 GEMM",而是"让整步去噪成为一张完整的计算图"</b>——且只能用纯 PyTorch 算子(lerobot 社区不接受专用 Triton/GEMM 内核入库)。</p>
+
+<h2><span class="no">3</span>方法</h2>
+
+<h3><span class="no">3.1</span>记号与常规实现</h3>
+<p>设 token 数 <var>T</var>,隐藏维 <var>H</var>,专家数 <var>E</var>,专家中间维 <var>I</var>,top-<var>k</var> 路由。输入 <var>X</var> ∈ ℝ<sup><var>T</var>×<var>H</var></sup>;专家 <var>e</var> 的权重 <var>W</var><sub>g</sub><sup>(<var>e</var>)</sup>, <var>W</var><sub>u</sub><sup>(<var>e</var>)</sup> ∈ ℝ<sup><var>I</var>×<var>H</var></sup>,<var>W</var><sub>d</sub><sup>(<var>e</var>)</sup> ∈ ℝ<sup><var>H</var>×<var>I</var></sup>(nn.Linear 约定 [out, in])。路由给出选中专家集合 <var>S</var>(<var>t</var>) 与权重 <var>r</var><sub><var>t,e</var></sub>。常规输出:</p>
+<span class="eq"><var>Y</var><sub><var>t</var></sub> = Σ<sub><var>e</var>∈<var>S</var>(<var>t</var>)</sub> <var>r</var><sub><var>t,e</var></sub> · [ SiLU(<var>x</var><sub><var>t</var></sub> W<sub>g</sub><sup>(<var>e</var>)</sup>ᵀ) ⊙ (<var>x</var><sub><var>t</var></sub> W<sub>u</sub><sup>(<var>e</var>)</sup>ᵀ) ] W<sub>d</sub><sup>(<var>e</var>)</sup>ᵀ <span class="tag">(1)</span></span>
+<p>分组(grouped)实现先按专家排序 gather 出每专家的 token 块,再逐专家(或按专家的 grouped kernel)做三次小 GEMM,最后 scatter 回原位——这正是发射开销与图断裂的来源。</p>
+
+<h3><span class="no">3.2</span>权重打包与路由权重折叠</h3>
+<p>构造两个 E 主序的打包权重(推理时一次性缓存):</p>
+<span class="eq">W<sub>1</sub> = [ W<sub>g</sub> ; W<sub>u</sub> ] 按专家拼接 → ℝ<sup><var>H</var> × <var>E</var>·2<var>I</var></sup>,&nbsp;&nbsp; W<sub>2</sub> = W<sub>d</sub> 按输入维拼接 → ℝ<sup><var>E</var>·<var>I</var> × <var>H</var></sup> <span class="tag">(2)</span></span>
+<p>前向只用两个普通 GEMM:</p>
+<span class="eq">[ <var>G</var> ‖ <var>U</var> ] = <var>X</var> W<sub>1</sub> ∈ ℝ<sup><var>T</var>×<var>E</var>·2<var>I</var></sup> <span class="tag">(3)</span></span>
+<span class="eq"><var>M</var> = SiLU(<var>G</var>) ⊙ <var>U</var> ∈ ℝ<sup><var>T</var>×<var>E</var>×<var>I</var></sup>,&nbsp;&nbsp; <var>M̃</var> = <var>M</var> ⊙ <var>R</var> <span class="tag">(4)</span></span>
+<span class="eq"><var>Y</var> = reshape(<var>M̃</var>, [<var>T</var>, <var>E</var>·<var>I</var>]) · W<sub>2</sub> ∈ ℝ<sup><var>T</var>×<var>H</var></sup> <span class="tag">(5)</span></span>
+<p>其中 <var>R</var> ∈ {0}∪ℝ<sup><var>T</var>×<var>E</var></sup> 是把 top-<var>k</var> 权重 one-hot 回稠密路由表(<var>t</var>, <var>e</var>∉<var>S</var>(<var>t</var>) 处恰为 0)。式 (5) 的 GEMM 归约沿 <var>E</var>·<var>I</var> 维求和,自动完成式 (1) 中的 Σ<sub><var>e</var></sub> <var>r</var><sub><var>t,e</var></sub>(·)——<b>加权合并不需要任何 scatter/index_add,它就是 down GEMM 本身</b>。</p>
+
+<h3><span class="no">3.3</span>等价性与数值</h3>
+<p>未选中的专家 <var>r</var><sub><var>t,e</var></sub> = 0,其贡献逐项为 0,故式 (5) ≡ 式 (1),差异仅来自浮点重结合(bf16 GEMM 的累加顺序变化)。实测:fp32 下最大相对差 1.4×10⁻⁶,bf16 下 4.8×10⁻³(GPU),与 attention 后端切换造成的偏差同量级;端到端动作相对差 0.78%,训练 seeded loss 相对差 9×10⁻⁷(见 §4)。</p>
+
+<h3><span class="no">3.4</span>复杂度与适用条件</h3>
+<p>稠密化把专家 FLOPs 放大了 <var>E</var>/<var>k</var> = 8 倍(每层 0.48 → 3.85 GFLOP)。代价成立的条件是"<b>发射成本 > 计算成本</b>"。本例中:路由机制(排序 + 32 路 gather/scatter + grouped kernel 的网格早退)约 15–20 次发射 × 360 次调用,而 8 倍 FLOPs 折算的 GPU 时间增量仅约 30–70 ms/次推理(A100,小 GEMM 效率按 20–40 TFLOPS 估)——且实测中这部分还被 GEMM 固定开销进一步吸收。门控阈值 <code>moe_dense_max_tokens</code>(默认 512)刻画交叉点:<var>T</var> ≤ 阈值走稠密,否则回退 grouped/eager 路径。注意"排序 + 定容 padding"方案在本工况下退化:容量上界 cap = <var>T</var> = 51,pad 后的形状 [32, 51, <var>H</var>] 与稠密全算完全相同——所以稠密是严格更简且同价的形态。</p>
+
+<h3><span class="no">3.5</span>与 torch.compile 的协同</h3>
+<p>两个 matmul + 逐点运算,全程静态形状、无 <code>.item()</code>/<code>.tolist()</code>、无自定义内核——<code>fullgraph=True</code> 直接通过。去噪步的 36 层得以融合为一张图,这是 §4 中 compile 收益的主要成分。梯度路径同样成立:autograd 下不读权重缓存(每次现算打包,梯度正常回流到三个专家参数),训练同码复用。</p>
+
+<div class="fig">
+<b style="font-size:0.8rem">图 1. 每次 MoE 调用的发射结构对比</b>
+<div style="height:0.6rem"></div>
+<div class="pipe">
+  <div class="st hot"><b>分组/Triton 路径</b>argsort → bincount → cumsum → gather → grouped GEMM ×3 → index_add</div>
+  <span class="arr">→</span>
+  <div class="st" style="flex:0.9 1 0"><b>~60 kernels</b><br>+ 1 次 graph break<br>+ 1 次 host sync(旧版)</div>
+</div>
+<div style="height:0.5rem"></div>
+<div class="pipe">
+  <div class="st cool"><b>本文稠密路径</b>GEMM(X·W₁) → SiLU⊙U ⊙R → GEMM(·W₂)</div>
+  <span class="arr">→</span>
+  <div class="st cool" style="flex:0.9 1 0"><b>2 个 GEMM + 融合逐点</b><br>无断点、无 sync、静态形状</div>
+</div>
+<div class="cap">发射次数的缩减 × 360 次调用/次推理,叠加整图融合,构成主要收益。</div>
+</div>
+
+<h2><span class="no">4</span>实验</h2>
+<p><b>设置。</b> A100-SXM4-80GB,真实 6B 权重(SO101 配置:1 路相机、6 维状态、chunk 50、10 步去噪),bf16。before = PR 原始代码(eager+fp32 attention、grouped MoE);dense = 本文实现(默认阈值 512);compile = <code>predict_velocity</code> 经 inductor 编译(cudagraphs 关闭)。<b>注意</b>:测量日宿主机有其它任务的 CPU 负载(load≈57/72 核),绝对值较空闲机偏高,但 before/after 同窗口背靠背测量,相对比较有效;空闲复测已在队列中。</p>
+
+<h3><span class="no">4.1</span>推理时延</h3>
+<div class="tbl-wrap"><table>
+<caption><b>表 2.</b> 端到端推理(每次 <code>predict_action_chunk</code>,出 50 步动作;20 次迭代均值)</caption>
+<thead><tr><th>配置</th><th class="num">总时 (ms)</th><th class="num">Δ vs before</th></tr></thead>
+<tbody>
+<tr><td>before(PR 原版)</td><td class="num">1489.1</td><td class="num"><span class="dim">—</span></td></tr>
+<tr><td>dense MoE(非编译)</td><td class="num">967.4</td><td class="num good">-35.0%</td></tr>
+<tr><td><b>dense MoE + compile</b></td><td class="num"><b>398.5</b></td><td class="num good"><b>-73.2%</b></td></tr>
+<tr><td><span class="dim">参考:官方 upstream(bf16+compile,3 相机)</span></td><td class="num"><span class="dim">391.2</span></td><td class="num"><span class="dim">—</span></td></tr>
+</tbody>
+</table></div>
+<p>非编译逐环节:dense 路径下 MoE 360 次调用合计 <b>228.4 ms</b>,已快于 Triton grouped 的 365.7 ms(-38%)——两个 GEMM 对十五次以上的杂项发射。compile 后零 recompile 告警,去噪整步成为单图,这是 398.5 ms 的主要来源。作为参照,官方 upstream 仓库 README 最快路径(厂商 Triton MoE + 整 sample_actions 编译)同机实测 391.2 ms:本文以纯 PyTorch 实现与之打平,且对方的 compile 范围还包含了本文尚未编译的 vision/prefix 段。</p>
+
+<h3><span class="no">4.2</span>训练吞吐</h3>
+<div class="tbl-wrap"><table>
+<caption><b>表 3.</b> 训练单步(fwd+bwd,不含 optimizer)</caption>
+<thead><tr><th>配置</th><th class="num">before (ms)</th><th class="num">dense (ms)</th><th class="num">Δ</th><th class="num">峰值显存 (GB)</th></tr></thead>
+<tbody>
+<tr><td>B=4(T=204 ≤ 512,走稠密)</td><td class="num">2807.1</td><td class="num">1501.3</td><td class="num good">-46.5%</td><td class="num">50.3</td></tr>
+<tr><td>B=16 + grad-ckpt(默认阈值,回退 eager 循环)</td><td class="num">8979.5</td><td class="num">8979.5</td><td class="num"><span class="dim">0</span></td><td class="num">28.7</td></tr>
+<tr><td>B=16 + grad-ckpt(阈值 1024,走稠密)</td><td class="num">8979.5</td><td class="num">6809.9</td><td class="num good">-24.1%</td><td class="num">28.7</td></tr>
+</tbody>
+</table></div>
+<p>训练侧的收益其实更大:原实现的回退是 32 专家的 Python 循环(每层 96 次小 GEMM 发射),稠密化把它压成 2 次。B=16 时 8 倍 FLOPs 开始变成真实成本,收益收窄但仍为正,且显存不增。</p>
+
+<h3><span class="no">4.3</span>数值一致性</h3>
+<div class="tbl-wrap"><table>
+<caption><b>表 4.</b> 与 fp32 参考的偏差(reassociation 级别)</caption>
+<thead><tr><th>检查</th><th class="num">结果</th></tr></thead>
+<tbody>
+<tr><td>单元级 dense vs eager(fp32,最大相对差)</td><td class="num">1.4×10⁻⁶</td></tr>
+<tr><td>端到端动作(dense+sdpa+bf16 vs fp32 参考,相对差)</td><td class="num">0.78%</td></tr>
+<tr><td>训练 seeded loss(B=4,相对差)</td><td class="num">9×10⁻⁷</td></tr>
+</tbody>
+</table></div>
+
+<h2><span class="no">5</span>讨论</h2>
+<ul>
+<li><b>何时不该用稠密</b>:<var>T</var> 很大(长序列训练、大批次)时 8 倍 FLOPs 成为真实算力开销,交叉点由 GEMM 效率与发射成本共同决定,故保留阈值开关与回退路径。</li>
+<li><b>与 CUDA graphs 的关系</b>:图完整后 launch 间隙进一步可用 CUDA graphs 消除,但本次工作按既定约束未使用;稠密实现与之正交、可叠加。</li>
+<li><b>社区可接受性</b>:实现不含任何专用内核,依赖为零增量,数值与原路径等价,满足 lerobot 的入库约束。</li>
+<li><b>局限</b>:表 2/3 测于 CPU 有负载的宿主机,空闲机绝对值会更低(before 空闲基线 1039.5 ms);编译范围目前仅覆盖 <code>predict_velocity</code>,vision/prefix 段的编译是下一步。</li>
+</ul>
+
+<h2><span class="no">6</span>结论</h2>
+<p>在"小 T、高频次"的流匹配 VLA 工况下,稀疏 MoE 的最优实现不是更精巧的路由调度,而是把调度整个删掉:两个打包 GEMM + 权重折叠,在纯 PyTorch 内同时获得等价数值、整图可编译性与训练推理同码。这提示一类更普遍的判断:<b>当每层计算微秒级时,先数 kernel 发射次数,再谈 FLOPs。</b></p>
+
+<h2><span class="no">附</span>参考与产物</h2>
+<ol class="refs">
+<li>lerobot PR #3967: LingBot-VLA 2.0 policy(HuggingFace / Robbyant),改动基线 commit 3b7dbaa0。</li>
+<li>Robbyant/lingbot-vla-v2 upstream 仓库(官方 deploy 路径与 130 ms @4090D 声明的对照实测)。</li>
+<li>实现 commit: <code>f2ff2ca5</code>(dense MoE),测试脚本 <code>bench/bench_lingbot_v2.py</code>,原始数据 <code>accel-bench/dense_bench_contended/</code>。</li>
+<li>Fedus et al., Switch Transformers(2021);Gale et al., MegaBlocks(2022)——大 T 工况下的分组 MoE 文献,本文工况与之互补。</li>
+</ol>
+
+</div>

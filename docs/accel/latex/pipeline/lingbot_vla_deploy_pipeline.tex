@@ -1,0 +1,253 @@
+% LingBot-VLA 2.0 × reBot 部署全链路 pipeline(4090D 实测建链记录)
+% 编译:tectonic -X compile lingbot_vla_deploy_pipeline.tex
+\documentclass[11pt]{ctexart}
+\input{cnreport-preamble}
+
+\renewcommand{\runningtitle}{LingBot-VLA 2.0 部署链路 Pipeline}
+\renewcommand{\reportdate}{2026 年 8 月 14 日}
+\renewcommand{\reportfooter}{accel-bench · TR-2026-08-14-PIPE}
+
+\begin{document}
+
+\reporthead{部署链路手册 · TR-2026-08-14-PIPE}{2026 年 8 月 14 日}
+{LingBot-VLA 2.0 × reBot:从裸机到训练的完整 Pipeline}
+{4$\times$4090D(24GB)上每一环的依赖、配置、产出与验证——按真实建链顺序记录}
+{平台:4$\times$RTX 4090 24GB(compshare)\quad 数据:rebot\_shakehands\quad 代码:lerobot pr3967-combined}
+
+\begin{cnabstract}
+本文记录在一台\textbf{全新} 4$\times$4090D 机器上,从零到能启动
+LingBot-VLA 2.0 训练/推理的完整链路:8 个环节,每环给出
+\textbf{依赖上游什么、装/配什么、产出什么、怎么验证}。
+链路于 2026-08-14 由 4 个并行 agent(网络/环境/下载/配置)+ 主控串行收尾
+真实建通;全部命令与配置逐字来自当天实操,坑位单列一节。
+训练启动的先后依赖关系见 §3 的 DAG 与 §4 的逐步命令。
+\end{cnabstract}
+\keywords{LingBot-VLA 2.0;reBot;4090D;fsdp2;pipeline;部署}
+
+\section{链路总览}
+\begin{lstlisting}[language=bash,caption={八环依赖 DAG(|| 表示可并行)}]
+L0 硬件/系统(4x4090, driver, CUDA)
+  -> L1 网络配置(pip/HF/git 镜像与直连决策)
+  -> L2 Python 环境(torch/transformers/lerobot editable)
+  -> L3 数据集(rebot_shakehands)  ||  L4 权重(lingbot-v2-6b + Qwen3-VL)
+  -> L5 配置(robot_config 依赖 L3 的 keys;
+              norm_stats 依赖 L3+L2;
+              fsdp2 yaml / bake 脚本 独立)
+  -> L6 ckpt 转换(依赖 L2+L4+L5:原始 ckpt -> lerobot 格式)
+  -> L7 训练启动(依赖 L2+L3+L5+L6;fsdp2 必须,24GB 单卡放不下)
+  -> L8 推理(依赖 L6 + bake 五开关;rollout 只需 --policy.path)
+\end{lstlisting}
+
+关键事实(决定配置选择的硬约束):
+\begin{itemize}
+\item 训练固定态 65.7GB(bf16 参数 11.6 + 梯度 10.8 + AdamW fp32 m+v 43.3)
+\textbf{远超 24GB 单卡} $\Rightarrow$ 4 卡 fsdp2 分片是 4090D 上\textbf{唯一}训练路径
+(DDP 每卡也要完整固定态,不行)。
+\item 推理只需约 12GB,单卡任意。
+\item 4090D 是 sm\_120(Blackwell 同代消费卡),torch 必须 $\ge$ 2.7/cu128 系;
+本机预装 torch 2.13.0+cu132。
+\end{itemize}
+
+\section{逐环节:依赖、配置、产出、验证}
+
+\subsection{L0 硬件与系统基线}
+\begin{itemize}
+\item \textbf{依赖}:无(裸机)。
+\item \textbf{核对}:\texttt{nvidia-smi} 确认 4$\times$24564MiB、driver 595.80;
+\texttt{df -h} 确认磁盘 $\ge$100GB 空余(权重 35G + 转换产物 12G + 数据集)。
+\item \textbf{产出}:确认可用的 CUDA 环境(/usr/local/cuda-13.2)。
+\end{itemize}
+
+\subsection{L1 网络配置}
+\begin{itemize}
+\item \textbf{依赖}:L0。
+\item \textbf{先测速再决策}(curl 大文件实测):本机 HF 直连峰值 11.9MB/s,
+hf-mirror 7.6MB/s(无优势 $\Rightarrow$ \textbf{不设} \texttt{HF\_ENDPOINT});
+aliyun pypi 8.6MB/s 稳定;github 直连 200。
+\item \textbf{配置}:\texttt{/etc/pip.conf} 与 \texttt{\textasciitilde/.config/pip/pip.conf}
+统一 aliyun index-url + trusted-host + timeout=60 + retries=5;
+\texttt{.condarc} 已是清华镜像不动。
+\item \textbf{注意}:整机入口带宽约 18--30MB/s 共享,多个 HF 下载并行只是瓜分带宽,
+串行或 2 并发即可。
+\item \textbf{验证}:\texttt{pip config list} 生效;curl 三个源复测。
+\end{itemize}
+
+\subsection{L2 Python 环境(最容易踩坑的一环)}
+\begin{itemize}
+\item \textbf{依赖}:L1(pip 镜像)。
+\item \textbf{基础}:conda env \texttt{py312}(python 3.12),预装
+torch 2.13.0+cu132 / torchvision / triton。
+\item \textbf{安装}:按 A100 参考环境的 pip freeze(剔除 torch*/triton/flash-attn)
+安装:transformers 5.5.4、accelerate 1.14.0、qwen-vl-utils 0.0.14、
+av 15.1.0、datasets 4.8.5、draccus 0.11.6、peft 0.19.1、safetensors、
+einops、huggingface\_hub 1.22.0、bitsandbytes 0.50.0 等。
+\item \textbf{两个``不装''}:flash-attn(编译慢,我们走 sdpa);
+torchcodec(已发布版本全部不兼容 torch 2.13 $\Rightarrow$ 视频解码落
+\textbf{pyav} 后端,av 15.1 已验证可解码,import 时的 fallback WARNING 是预期)。
+\item \textbf{lerobot 本体}:同步源码树到 \texttt{/root/lerobot-port} 后
+\texttt{pip install -e . --no-deps}。\textbf{坑}:仓库根的
+\texttt{setup.py}、\texttt{MANIFEST.in}、\texttt{README.md} 必须齐全
+(pyproject 把 readme 声明为 dynamic,实际由 setup.py 提供),
+缺了报 ``No configuration found for dynamic readme''。
+freeze 文件里的 \texttt{-e <路径>} 行要先删掉再 \texttt{pip install -r}。
+\item \textbf{验证(五项全过才算通)}:
+\begin{itemize}[itemsep=0pt,topsep=1pt,parsep=0pt]
+\item \texttt{import lerobot} 指向源码树;
+\item \texttt{get\_policy\_class('lingbot\_vla\_v2')} $\to$ \texttt{LingbotVLAV2Policy};
+\item processor registry 能取到 \texttt{lingbot\_vla\_v2\_feature\_transform};
+\item \texttt{lerobot-train -{}-help} 正常输出;
+\item pyav 解码合成 mp4 成功。
+\end{itemize}
+\end{itemize}
+
+\subsection{L3 数据集}
+\begin{itemize}
+\item \textbf{依赖}:L1(HF 直连)。
+\item \textbf{下载}:\texttt{hf download miracle-techlink/rebot\_shakehands
+-{}-repo-type dataset -{}-local-dir /root/datasets/rebot\_shakehands}。
+\item \textbf{核对} \texttt{meta/info.json}:100 episodes / 73801 帧 / 30fps;
+\texttt{observation.state} 与 \texttt{action} 均 7 维;
+图像 key 为 \texttt{front}、\texttt{wrist}(480$\times$640)——
+\textbf{这两个名字决定 L5 的 robot\_config 怎么写}。
+\end{itemize}
+
+\subsection{L4 权重(与 L3 并行)}
+\begin{itemize}
+\item \textbf{依赖}:L1。
+\item \textbf{下载}:\texttt{Robbyant/lingbot-vla-v2-6b}(原始格式,约 35GB,
+含 depth/dino 蒸馏附件,训练不用但整仓下省心)到
+\texttt{/root/ckpts/lingbot-vla-v2-6b};
+\texttt{Qwen/Qwen3-VL-4B-Instruct} 到 \texttt{/root/ckpts/Qwen3-VL-4B-Instruct}
+(tokenizer/processor 用;其权重不必需,VLM 主干权重在 LingBot ckpt 内)。
+\item \textbf{验证}:ckpt 有 \texttt{config.json}(含 \texttt{vlm\_family});
+Qwen 目录有 \texttt{tokenizer.json} 与\newline \texttt{preprocessor\_config.json}。
+\end{itemize}
+
+\subsection{L5 配置文件(四件)}
+\begin{itemize}
+\item \textbf{依赖}:robot\_config 依赖 L3 的 key 名;norm\_stats 依赖 L2+L3;
+fsdp2/bake 独立。
+\item \textbf{robot\_config\_shakehands.yaml}:7 维 state/action 映射进 14 维
+\texttt{arm.position} 槽位 [0:7];\texttt{front}$\to$\texttt{camera\_top}、
+\texttt{wrist}$\to$\texttt{camera\_wrist\_left};第三槽不映射(自动 mask,
+日志 warning 是预期);末尾 \texttt{norm\_stats:} 指向下一步产物。
+\item \textbf{norm\_stats.json}:用 \texttt{gen\_norm\_stats.py}
+(LeRobotDataset 全帧 mean/std,std+1e-8 防夹爪常量除零)从 L3 生成,
+输出 key 必须是 \texttt{observation.state.arm.position} /
+\texttt{action.arm.position}。
+\item \textbf{fsdp2\_4gpu.yaml}:accelerate 配置——\texttt{fsdp\_version: 2}、
+FULL\_SHARD、\texttt{mixed\_precision: bf16}、\texttt{num\_processes: 4}。
+\item \textbf{bake\_ckpt.py}:推理五开关固化脚本(见 L8)。
+\end{itemize}
+
+\subsection{L6 ckpt 转换(原始 $\to$ lerobot 格式)}
+\begin{itemize}
+\item \textbf{依赖}:L2(代码可 import)+ L4(原始 ckpt + tokenizer)+ L5(robot\_config + norm\_stats)。
+\item \textbf{命令}:
+\end{itemize}
+\begin{lstlisting}[language=bash,caption={一次性转换(约 10 分钟,CPU 可跑)}]
+python -m lerobot.policies.lingbot_vla_v2.convert_upstream_checkpoint \
+  --input /root/ckpts/lingbot-vla-v2-6b \
+  --output /root/ckpts/shakehands-lerobot \
+  --robot-config-path /root/d4090_cfg/robot_config_shakehands.yaml \
+  --norm-stats-path  /root/d4090_cfg/norm_stats.json \
+  --tokenizer-path   /root/ckpts/Qwen3-VL-4B-Instruct
+\end{lstlisting}
+\begin{itemize}
+\item \textbf{产出}:shakehands-lerobot/(12GB),含
+\texttt{config.json}(\texttt{type} 为 \texttt{lingbot\_vla\_v2},attention 默认 sdpa)、
+\texttt{model.safetensors}、\texttt{policy\_preprocessor.json} 与
+\texttt{policy\_postprocessor.json}。robot\_config 与 norm\_stats 已嵌入,
+之后任何机器加载都不再需要这两个文件。
+\end{itemize}
+
+\subsection{L7 训练启动(fsdp2,24GB 唯一路径)}
+\begin{itemize}
+\item \textbf{依赖}:L2+L3+L5(fsdp2 yaml)+ L6。
+\item \textbf{命令}(延迟定位短跑:steps=50、batch\_size=1 起步):
+\end{itemize}
+\begin{lstlisting}[language=bash,caption={4 卡 fsdp2 训练启动}]
+accelerate launch --config_file /root/d4090_cfg/fsdp2_4gpu.yaml \
+  $(which lerobot-train) \
+  --dataset.repo_id=miracle-techlink/rebot_shakehands \
+  --dataset.root=/root/datasets/rebot_shakehands \
+  --dataset.streaming=false \
+  --policy.type=lingbot_vla_v2 \
+  --policy.pretrained_path=/root/ckpts/shakehands-lerobot \
+  --policy.robot_config_path=/root/d4090_cfg/robot_config_shakehands.yaml \
+  --policy.norm_stats_path=/root/d4090_cfg/norm_stats.json \
+  --policy.dtype=bfloat16 --policy.optimizer_fused=true \
+  --policy.push_to_hub=false \
+  --batch_size=1 --steps=50 --log_freq=10 --num_workers=4 \
+  --save_checkpoint=false \
+  --output_dir=/root/output_lerobot_train/shakehands_fsdp \
+  --job_name=shakehands_fsdp --wandb.enable=false
+\end{lstlisting}
+\begin{itemize}
+\item \textbf{纪律}:\texttt{batch\_size} 是\textbf{每卡}语义;
+\textbf{不设} \texttt{sdpa\_backend}(CUDNN NaN / EFFICIENT 无 kernel);
+B$\le$4 不开 grad-ckpt(+38\% 慢);OOM 再降 \texttt{image\_max\_pixels}。
+\end{itemize}
+
+\subsection{L8 推理(bake 一次,之后零 flag)}
+\begin{itemize}
+\item \textbf{依赖}:L6 + bake 脚本(L5)。
+\item \textbf{bake}:五开关写进 ckpt \texttt{config.json}:
+\begin{itemize}[itemsep=0pt,topsep=1pt,parsep=0pt]
+\item \texttt{compile\_predict\_velocity = true}
+\item \texttt{compile\_predict\_velocity\_mode = "max-autotune-no-cudagraphs"}
+\item \texttt{compile\_prefix = true}
+\item \texttt{preprocess\_device = "cuda"}
+\item \texttt{num\_steps = 10}
+\end{itemize}
+\item \textbf{之后}:rollout/bench 只需 \texttt{-{}-policy.path=<ckpt>};
+首次推理有一次性 inductor 编译(A100 上 43.7s,4090D 预计更长)。
+\end{itemize}
+
+\section{启动一次训练的先后依赖(速查)}
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{训练启动的依赖链:每行 = 该步必需的已完成上游}
+\begin{tabular}{@{}llp{6.8cm}@{}}
+\toprule
+步骤 & 直接依赖 & 缺失时的症状 \\
+\midrule
+L1 网络 & L0 & pip/HF 超时或 11s 索引延迟 \\
+L2 环境 & L1 & registry 缺 step / `lerobot-train` 不存在 \\
+L3 数据 & L1 & FeatureTransform 断言(相机名不符) \\
+L4 权重 & L1 & 转换脚本找不到 config.json \\
+L5 配置 & L3(+L2) & norm\_stats 维度错;robot\_config key 对不上 \\
+L6 转换 & L2+L4+L5 & —— \\
+L7 训练 & L2+L3+L5+L6 & 24GB 单卡直跑必 OOM(固定态 65.7GB) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+可并行:L3 $\parallel$ L4;L5 的 fsdp2/bake 两件与一切 $\parallel$。
+不可跳过:L6(原始 ckpt 不能被 lerobot-train 直接加载)。
+
+\section{坑位实录(2026-08-14 建链当天)}
+\begin{enumerate}
+\item \texttt{pip install -e} 报 dynamic readme:缺仓库根 \texttt{setup.py}/\texttt{MANIFEST.in},补文件即可,pyproject 无辜。
+\item freeze 里的 \texttt{-e <原机器路径>} 行会让 \texttt{pip install -r} 直接报错,先删。
+\item torchcodec 与 torch 2.13 全系不兼容,用 pyav;fallback WARNING 别当真错误。
+\item paramiko/ssh exec 跑 nohup 会挂到超时但任务已启动——看 log 别重发;
+\texttt{pgrep -f} 会匹配到 exec 自己的命令串,判活用 log/STATUS 文件。
+\item sftp 大文件单流会 stall(12GB 传到 10.3GB 停摆),断点续传用
+\texttt{dd iflag=skip\_bytes} 取尾段拼接 + \texttt{tar tf} 校验。
+\item 多 agent 并行时:pip 只能一家动、下载串行/2 并发(带宽共享 18--30MB/s)。
+\end{enumerate}
+
+\section*{参考与产物}
+\begin{itemize}[itemsep=0pt,topsep=1pt,parsep=0pt]
+\item 远程产物目录:\texttt{/root/d4090\_cfg/}(四件配置 + REPORT.md)、
+\texttt{/root/d4090\_net/}、\texttt{/root/d4090\_env/}、\texttt{/root/d4090\_dl/}(各自 REPORT.md)。
+\item 配置权威来源(docs/accel/ 下):\newline
+\texttt{lingbot\_vla\_v2\_community\_quickstart.md}、
+\texttt{lingbot\_vla\_switch\_table.pdf}、
+\texttt{lingbot\_vla\_rebot\_guide.pdf}。
+\item 最优配置数字依据:\newline
+\texttt{docs/accel/lingbot\_vla\_v2\_total\_report.pdf}。
+\end{itemize}
+
+\end{document}

@@ -1,0 +1,98 @@
+% cnreport-preamble.tex — 中文技术报告导言区(Cosmos/arXiv 单栏风格)
+% 用法: \documentclass[11pt]{ctexart} 之后 \input{cnreport-preamble}
+% 编译: tectonic(XeTeX 引擎),需要系统安装 Noto Serif/Sans CJK SC 字体
+\usepackage[a4paper,top=2.7cm,bottom=2.7cm,left=2.5cm,right=2.5cm,headheight=15pt]{geometry}
+\usepackage{fontspec}
+% 正文:拉丁衬线 + 思源宋体;标题:拉丁无衬线 + 思源黑体
+% 按文件名从 TeX 字体树加载(tectonic bundle 自带 TeX Gyre;系统字体需 Noto CJK SC)
+\setmainfont{texgyretermes}[Extension=.otf,UprightFont=*-regular,BoldFont=*-bold,ItalicFont=*-italic,BoldItalicFont=*-bolditalic]
+\setsansfont{texgyreheros}[Extension=.otf,UprightFont=*-regular,BoldFont=*-bold,ItalicFont=*-italic,BoldItalicFont=*-bolditalic]
+\setmonofont{texgyrecursor}[Extension=.otf,UprightFont=*-regular,BoldFont=*-bold,Scale=0.88]
+\setCJKmainfont{Noto Serif CJK SC}[BoldFont={Noto Serif CJK SC Bold}]
+\setCJKsansfont{Noto Sans CJK SC}[BoldFont={Noto Sans CJK SC Bold}]
+\setCJKmonofont{Noto Sans Mono CJK SC}
+% 带圈数字 ①-⑳ 等划入 CJK 类,用 CJK 字体渲染(xeCJK 默认按拉丁处理)
+\xeCJKDeclareCharClass{CJK}{"2460 -> "24FF}
+
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{listings}
+
+% ---- 配色(主色可改) ----
+\definecolor{accent}{HTML}{0E5FA8}     % 强调蓝(链接/节号)
+\definecolor{good}{HTML}{0E7A4D}       % 正向结果
+\definecolor{warn}{HTML}{B45309}       % 负向/警示
+\definecolor{faint}{HTML}{6B7889}      % 弱化文字
+\definecolor{codebg}{HTML}{F0F2F5}
+\definecolor{rule}{HTML}{C9CFD8}
+
+\usepackage[colorlinks=true,linkcolor=accent,citecolor=accent,urlcolor=accent]{hyperref}
+
+% ---- 章节标题:无衬线粗体,节号着色 ----
+\titleformat{\section}{\Large\bfseries\sffamily}{\textcolor{accent}{\thesection}}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries\sffamily}{\textcolor{accent}{\thesubsection}}{0.5em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\sffamily}{\textcolor{accent}{\thesubsubsection}}{0.5em}{}
+\titlespacing{\section}{0pt}{1.6em}{0.7em}
+\titlespacing{\subsection}{0pt}{1.2em}{0.5em}
+
+% ---- 页眉页脚(Cosmos 式:左标题右日期,下细线) ----
+\newcommand{\runningtitle}{}  % 主文档用 \renewcommand 设置
+\newcommand{\reportdate}{}
+\newcommand{\reportfooter}{}
+\fancypagestyle{cnreport}{%
+  \fancyhf{}
+  \fancyhead[L]{\small\sffamily \runningtitle}
+  \fancyhead[R]{\small\sffamily \reportdate}
+  \fancyfoot[L]{\small\color{faint}\sffamily \reportfooter}
+  \fancyfoot[R]{\small\sffamily \thepage}
+  \renewcommand{\headrulewidth}{0.4pt}
+  \renewcommand{\footrulewidth}{0pt}
+}
+\pagestyle{cnreport}
+
+% ---- 题注与列表 ----
+\captionsetup{font=small,labelfont={bf,sf},skip=6pt}
+\setlist{itemsep=2pt,topsep=4pt,parsep=0pt}
+
+% ---- 代码 ----
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single, framerule=0.3pt, rulecolor=\color{rule},
+  xleftmargin=6pt, xrightmargin=6pt,
+  breaklines=true, columns=fullflexible, keepspaces=true,
+  aboveskip=8pt, belowskip=8pt,
+}
+
+% ---- 报告头(kicker / 标题 / 副题 / 署名 / 摘要 / 关键词) ----
+% 用法: \reporthead{kicker-left}{kicker-right}{标题}{副题}{署名行}
+\newcommand{\reporthead}[5]{%
+  \begin{center}
+  {\small\sffamily\bfseries\color{accent} #1 \hfill #2}\\[2pt]
+  {\color{black}\rule{\linewidth}{1.2pt}}\\[14pt]
+  {\LARGE\sffamily\bfseries #3\par}\vspace{8pt}
+  {\large\color{faint} #4\par}\vspace{10pt}
+  {\small\sffamily\color{faint} #5\par}\vspace{4pt}
+  {\color{rule}\rule{\linewidth}{0.4pt}}
+  \end{center}\vspace{6pt}
+}
+% 摘要块: \begin{cnabstract} ... \end{cnabstract}
+\newenvironment{cnabstract}{%
+  \begin{quote}\small\color{faint}\sffamily\bfseries\color{black} 摘要 \quad\normalfont\rmfamily\color{faint!80!black}%
+}{\end{quote}\vspace{2pt}}
+\newcommand{\keywords}[1]{\begin{quote}\small\color{faint}{\bfseries\sffamily\color{black} 关键词:\ } #1\end{quote}}
+
+% 表内彩色标记
+\newcommand{\upgood}[1]{\textcolor{good}{\bfseries #1}}
+\newcommand{\downbad}[1]{\textcolor{warn}{\bfseries #1}}
+\newcommand{\dimtext}[1]{\textcolor{faint}{#1}}
+
+\setlength{\parskip}{2pt}
+\linespread{1.12}
+\emergencystretch=3em  % CJK 段落容忍度,消除 overfull
