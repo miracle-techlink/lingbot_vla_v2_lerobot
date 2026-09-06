@@ -1,0 +1,168 @@
+\documentclass[11pt]{ctexart}
+\input{cnreport-preamble}
+
+\renewcommand{\runningtitle}{LingBot-VLA 2.0 RoboTwin 闭环评测首轮报告}
+\renewcommand{\reportdate}{2026 年 8 月 18 日}
+\renewcommand{\reportfooter}{具身智能工作组 · TR-2026-08-RTW}
+
+\begin{document}
+
+\reporthead{技术报告 · TR-2026-08-RTW}{2026 年 8 月 18 日}
+{LingBot-VLA 2.0 RoboTwin 闭环评测首轮:训练收敛与评测链路现状}
+{对象:Qwen3-VL-4B 视觉语言主干 + 36 层稀疏 MoE 动作专家(flow matching,约 6B 参数)\\ LoRA($r{=}32$)微调 30k 步 · RoboTwin 2.0(SAPIEN)仿真闭环}
+{具身智能工作组 \quad 测试平台:4$\times$RTX 4090D(compshare pod)\quad 代码基线:lerobot PR \#3967 + XPolicyLab}
+
+\begin{cnabstract}
+本报告汇总 LingBot-VLA 2.0 在 RoboTwin 仿真基准上的首轮 LoRA 微调与闭环评测。训练侧,4$\times$4090D 以全局 batch 16 完成 30k 步(6600 段轨迹),L1 flow-matching 损失自 0.168 平滑降至 \textbf{0.071}(末 1k 步均值 0.069),全程含一次断点续训窗口,曲线无异常跳变。评测侧,计划的``4 存档 $\times$ 6 任务 $\times$ 3 试次''粗扫仅完成一个组合:merged\_030000 $\times$ place\_empty\_cup 共 \textbf{12 个有效计分回合,成功率 0/12(0.0\%)};其余组合因推理服务端连接超时与仿真环境专家系统报错未能开跑。报告如实呈现损失曲线、成功率矩阵(缺失格注明原因)、代表性失败回合逐帧序列,并将评测链路的三类基础设施失败归因,给出下一轮 20-trial 正扫的修复清单。结论:训练已收敛到可评测状态,当前瓶颈不在模型而在评测基础设施稳定性;0\% 成功率在 12 个样本下置信区间宽(95\% CI 上界约 22\%),不宜据此对模型能力下定论。
+\end{cnabstract}
+\keywords{LingBot-VLA 2.0;RoboTwin;闭环评测;成功率;LoRA 微调;flow matching}
+
+%======================================================================
+\section{评测设置}
+
+\subsection{模型与训练配置}
+
+被评测对象为 LingBot-VLA 2.0:Qwen3-VL-4B 视觉语言主干 + 36 层稀疏 MoE 动作专家(约 6B 参数),动作头为 flow matching(训练时 10 步去噪,推理按存档内嵌配置执行)。微调采用 LoRA,在 compshare 4$\times$RTX 4090D pod 上以 \texttt{lerobot-train}(accelerate DDP)完成,配置见表~\ref{tab:traincfg}。
+
+\begin{table}[h]
+\centering
+\caption{RoboTwin LoRA 微调配置(存档目录 \texttt{train\_lora\_r32\_20k})。}
+\label{tab:traincfg}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+数据集 & \texttt{lerobot/robotwin\_unified},6600 段(episode 4400--26949) \\
+LoRA & $r{=}32$,$\alpha{=}64$,注入注意力与 MLP 投影 \\
+优化器 & AdamW,lr $1\times10^{-4}$ 余弦退火至 $1\times10^{-5}$ \\
+批量 & 每卡 4 $\times$ 4 卡 = 全局 16 samples \\
+吞吐 & $\approx$1.23\,s/step,$\approx$11\,samples/s,显存 13.3\,GB/卡 \\
+步数计划 & 30k 步;存档每 1k 步落盘(001000--030000 齐全) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+训练实际分三段执行:首段(8 月 16 日 21:43 起)进行至约 4.2k 步被终止;随后三次手动重启(03:36--04:17)均短命;最后由 watchdog 自动续训,自存档 006000 起\textbf{连续运行 6000$\to$30000 步}(04:19--14:30,约 10\,h)。三段属同一训练谱系(同一命令、断点续训),损失曲线可拼接为一条。
+
+\subsection{仿真评测栈}
+
+闭环评测走 XPolicyLab 框架对接 RoboTwin 2.0(SAPIEN 物理 + llvmpipe 软件光栅),策略侧经 websocket 策略服务器加载 \texttt{export\_merged} 导出的合并权重(约 12\,GB),推理按\textbf{存档内嵌配置}执行(num\_steps=10,bf16,eager,无 compile/CUDA Graph,CPU 预处理)——即评测走的是未加速的原始路径,与真机部署的 4/7 步加速配置不同口径。原计划粗扫:4 个存档(008000/016000/024000/030000,另有 020000 提前评测)$\times$ 6 任务(place\_empty\_cup、stack\_blocks\_two、place\_can\_basket、open\_laptop、handover\_block、stamp\_seal)$\times$ 3 试次,指令类型 \texttt{seen}(demo\_clean)。
+
+%======================================================================
+\section{训练损失曲线}
+
+图~\ref{fig:loss}给出 1k--30k 步全程 L1 flow-matching 训练损失(每 20 步一条,共 1409 条记录;首 1k 步为 warm-up 未计入日志)。损失自 0.168 平滑降至 0.071,29k--30k 步均值 0.069,末段斜率已趋平。4.2k--6k 步的阴影区间为前述断点续训窗口:曲线在该窗口内连续过渡,未见数据顺序重置导致的损失跳变,说明数据采样状态(\texttt{Resuming data order})正确恢复。
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{figs/loss_curve_30k.png}
+\caption{RoboTwin LoRA 微调全程训练损失(4$\times$4090D,全局 batch 16,1k--30k 步)。细线为每 20 步原始值,粗线为 500 步滑动平均;阴影为 4.2k--6k 步断点续训窗口;终值 0.071。}
+\label{fig:loss}
+\end{figure}
+
+%======================================================================
+\section{闭环成功率:计划与实际}
+
+\subsection{成功率矩阵}
+
+表~\ref{tab:sr}为存档 $\times$ 任务成功率矩阵。12 个计划组合中仅 1 个拿到计分数据:merged\_030000 在 place\_empty\_cup 上 12 个有效回合全部失败。其余格未开跑,原因见 §\ref{sec:fail}。
+
+\begin{table}[h]
+\centering
+\caption{闭环成功率(指令 seen;merged 权重;行=任务,列=存档步数)。橙格为已跑组合,灰格为未跑;括号内为有效计分回合数。}
+\label{tab:sr}
+\footnotesize
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+任务 \textbackslash 存档 & 008000 & 016000 & 020000 & 024000 & 030000 \\
+\midrule
+place\_empty\_cup & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} & \downbad{0.0\%} (12) \\
+stack\_blocks\_two & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} \\
+place\_can\_basket & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} \\
+open\_laptop & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} \\
+handover\_block & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} \\
+stamp\_seal & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} & \dimtext{$-$} \\
+\bottomrule
+\end{tabular}
+
+\smallskip
+{\footnotesize ``$-$''=未开跑:粗扫批次在策略服务器连接阶段被终止,未进入仿真(见 §\ref{sec:fail});唯一已跑组合为 merged\_030000 $\times$ place\_empty\_cup。}
+\end{table}
+
+已计分的 12 个回合构成:smoke 轮 r2 贡献 9 回合(seed 200000--200010,其中 2 个回合崩溃未计分),r4/r5 各贡献 1 回合,r6 贡献 1 回合。12 回合全部判失败,其中 r6 回合跑满 500 步(50\,s)上限判负。
+
+\subsection{评测尝试台账}
+
+表~\ref{tab:ledger}按时间序记录全部评测尝试及结局,区分``计分''与``基础设施失败''。
+
+\begin{table}[h]
+\centering
+\caption{评测尝试台账(8 月 17 日)。``计分''指进入仿真并产出成功/失败判定;目标列括号内为计划试次数。}
+\label{tab:ledger}
+\footnotesize
+\begin{tabular}{@{}llll@{}}
+\toprule
+批次(日志) & 目标 & 结局 & 计分 \\
+\midrule
+sweep4 / sweep4\_r2 & 4 存档 $\times$ 6 任务(各 3) & 策略服务器连接超时被杀 & 0 \\
+eval\_20k / eval\_20k\_r2 & 020000(3) & 同上 & 0 \\
+eval\_30k\_manual\_r1--r3 & 030000 单任务 & 启动失败/短命中断 & 0 \\
+eval\_30k\_manual\_r4 & 030000 单任务 & 环境专家系统报错 & 0 \\
+eval\_30k\_smoke\_r2 & 030000,place\_empty\_cup(11) & 9 回合全败,2 回合崩溃 & 9 \\
+eval\_30k\_smoke\_r3 & 同上 & 专家系统 BrokenPipe 风暴 & 0 \\
+eval\_30k\_smoke\_r4/r5 & 030000,place\_empty\_cup(各 1) & 各 1 回合计分,失败 & 2 \\
+eval\_30k\_smoke\_r6 & 同上 & 1 回合跑满 500 步判负 & 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%======================================================================
+\section{代表性回合逐帧}
+
+图~\ref{fig:rollout}为 r6 回合(place\_empty\_cup,seed 200000)的 4 个时刻截图。机械臂在 50\,s 内未能完成``将空杯放到目标位'';从帧序列看,末端在场景中段持续小幅徘徊,未形成对杯子的稳定抓取--搬运轨迹。该回合同时暴露评测栈的稳定性问题:策略 websocket 连接因 keepalive 超时在全程内反复断开重连(几乎每 2--3 步一次),单步决策节拍被拉长,回合实际耗时远超 50\,s 仿真时间。另两个计分回合(r4/r5)的视频文件为 262 字节空壳,仅日志留有判负记录。
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{figs/rollout_strip.png}
+\caption{失败回合逐帧(merged\_030000,place\_empty\_cup,seed 200000,10\,Hz,500 步)。$t{=}0/16/33/47$\,s 四个时刻;臂全程未完成抓放,判负。}
+\label{fig:rollout}
+\end{figure}
+
+%======================================================================
+\section{讨论与局限}\label{sec:fail}
+
+\subsection{三类基础设施失败及归因}
+
+\textbf{(1) 策略服务器连接超时(sweep4/20k 批次,4 次尝试)。}日志显示策略进程已启动并开始加载 12\,GB 合并权重(``Loading weights from local directory''后无进展输出),连接等待 180\,s 即被外层终止;而后续 smoke 轮在同样加载路径下成功出分,差异在于 smoke 轮给足了冷加载时间。合并权重在 4090D 上的冷加载(页缓存缺失)超过 3 分钟,粗扫编排的等待预算不足,属\textbf{编排超时参数问题},非服务不可用。
+
+\textbf{(2) 环境专家系统报错(smoke\_r3、manual\_r4)。}RoboTwin 的专家示证检查(Curobo 运动规划)在部分 seed 上抛 \texttt{BrokenPipeError} 与 \texttt{'Robot' object has no attribute 'left\_planner'},呈连续风暴状,回合无法计分。这是 SAPIEN/规划器初始化与多进程收割的稳定性问题,与被测策略无关。
+
+\textbf{(3) websocket keepalive 超时(smoke\_r6)。}策略端单步延迟(eager 10 步 + CPU 预处理)超过 keepalive 窗口,连接反复重连。真机部署侧同模型已优化至 108--130\,ms/块(compile + GPU 预处理 + CUDA Graph),评测栈沿用未加速路径导致该现象;后续评测应以加速配置起服,或将 keepalive 窗口放宽。
+
+\subsection{对 0\% 成功率的解读}
+
+12 回合全败的 Clopper--Pearson 95\% 置信区间为 [0\%, 22\%],样本量不足以区分``完全未学会''与``低成功率任务'';且全部样本来自单一任务、单一存档、部分回合受第 (3) 类故障干扰。损失曲线平滑收敛(0.071)与真机侧同架构模型可完成抓握手任务的既有结果,均提示不宜据本轮对模型下终判。定论需等 20-trial 正扫。
+
+\subsection{下一步}
+
+\begin{itemize}
+\item 修复编排:粗扫脚本为策略服务器冷加载放宽等待(或预热常驻服务器),按 6 任务 $\times$ 20 试次对 030000/024000 正扫;
+\item 评测栈换加速推理配置起服(compile + 4/7 步),消除 keepalive 重连,同时给出与真机一致的口径;
+\item 专家系统报错清单化:统计 BrokenPipe/\texttt{left\_planner} 触发 seed,绕开或升级 RoboTwin 补丁;
+\item 020000/016000/008000 存档补测,形成完整存档--成功率曲线。
+\end{itemize}
+
+%======================================================================
+\section{结论}
+
+训练侧 30k 步 LoRA 微调已完整落地:损失 0.168$\to$\textbf{0.071},存档齐全,具备批量评测条件。评测侧首轮粗扫因三类基础设施问题仅产出 1/12 组合的数据(place\_empty\_cup $\times$ 030000,0/12),报告已将失败逐批归因并给出修复清单;模型能力判定留待修复后的 20-trial 正扫。
+
+\section*{参考与产物}
+\begin{itemize}\small
+\item 训练日志:pod \path{/root/logs/train_20k.log}、\path{train_30k_auto.log}(12.3\,MB 全量已拉回本地);
+\item 评测日志:pod \path{/root/logs/eval_sweep4*.log}、\path{eval_20k*.log}、\path{eval_30k_*.log};
+\item 结果落盘:pod \path{/root/xpl_ws/robotwin/eval_result/place_empty_cup/LingBot_VLA_V2/demo_clean/merged_030000/};
+\item 本地产物:\path{/home/nvidia/reports/robotwin_eval_report/}(损失数据 \path{data/rtw_loss_full_30k.json},图 \path{figs/},本报告源文件);
+\item 驱动脚本:pod \path{/root/auto_eval_rtw.sh}、\path{/root/lerobot-port/bench/eval_ckpt_pod.sh}。
+\end{itemize}
+
+\end{document}

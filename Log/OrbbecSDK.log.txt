@@ -1,0 +1,135 @@
+[08/17 12:59:31.000322][info][428018][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 12:59:42.275447][error][428249][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:42.375598][error][428249][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:42.526104][error][428249][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:42.626257][error][428249][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:42.776527][error][428249][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:42.876663][error][428249][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:43.026918][error][428249][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:43.127053][error][428249][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:43.277298][error][428249][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:43.377447][error][428249][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:43.527717][error][428249][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:43.627842][error][428249][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:44.642143][error][428018][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:44.742269][error][428018][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:44.842459][error][428249][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 12:59:44.942574][error][428249][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:42.225991][info][434551][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 13:00:53.521556][error][434768][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:53.621691][error][434768][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:53.771955][error][434768][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:53.872091][error][434768][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:54.022355][error][434768][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:54.122459][error][434768][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:54.272722][error][434768][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:54.372858][error][434768][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:54.523121][error][434768][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:54.623248][error][434768][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:54.773605][error][434768][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:54.873748][error][434768][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:55.864846][error][434551][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:55.964979][error][434551][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:56.065303][error][434768][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:00:56.165554][error][434768][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:24.457455][info][438241][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 13:01:35.744227][error][438582][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:35.844407][error][438582][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:36.005134][error][438582][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:36.105286][error][438582][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:36.255553][error][438582][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:36.355686][error][438582][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:36.505943][error][438582][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:36.606079][error][438582][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:36.756326][error][438582][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:36.856457][error][438582][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:37.006714][error][438582][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:37.106843][error][438582][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:38.136849][error][438241][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:38.237006][error][438241][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:38.346997][error][438582][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:01:38.447128][error][438582][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:45.470807][info][456232][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 13:04:56.763697][error][456479][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:56.863831][error][456479][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:57.014088][error][456479][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:57.114226][error][456479][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:57.264472][error][456479][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:57.364604][error][456479][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:57.514842][error][456479][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:57.614981][error][456479][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:57.765238][error][456479][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:57.865471][error][456479][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:58.015719][error][456479][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:58.115844][error][456479][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:59.077839][error][456232][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:59.177944][error][456232][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:59.278172][error][456479][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 13:04:59.378305][error][456479][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 20:49:11.472084][info][1902996][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 21:26:35.522781][info][1941250][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 21:32:33.238046][info][1943775][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 21:45:54.711441][info][1953366][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 22:40:34.996965][info][2004598][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 22:44:55.351664][info][2005810][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 22:54:29.304687][info][2008932][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 22:57:25.163885][info][2010095][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 23:07:52.654188][info][2015087][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 23:12:51.734740][info][2016783][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 23:14:31.318810][info][2017498][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 23:15:58.690851][info][2018244][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 23:16:09.993061][error][2018578][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:16:10.093330][error][2018578][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:16:10.243742][error][2018578][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:16:10.343986][error][2018578][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:16:10.494347][error][2018578][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:16:10.594504][error][2018578][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:16:10.745116][error][2018578][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:16:10.845353][error][2018578][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:16:10.995715][error][2018578][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:16:11.095952][error][2018578][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:16:11.246320][error][2018578][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:16:11.346455][error][2018578][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:16:12.312341][error][2018244][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:16:12.412571][error][2018244][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:16:12.512969][error][2018578][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:17:17.424608][info][2018973][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 23:19:00.272720][info][2019683][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 23:19:11.467261][error][2020040][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:19:11.567588][error][2020040][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:19:11.717959][error][2020040][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:19:11.818096][error][2020040][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:19:11.968342][error][2020040][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:19:12.068478][error][2020040][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:19:12.218738][error][2020040][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:19:12.318960][error][2020040][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:19:12.469207][error][2020040][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:19:12.569347][error][2020040][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:19:12.719716][error][2020040][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:19:12.819906][error][2020040][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:19:13.783378][error][2019683][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:19:13.883655][error][2019683][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:19:13.983873][error][2020040][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:21:42.856842][info][2020992][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 23:23:59.718230][info][2022163][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 23:24:10.912108][error][2023216][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:24:11.012283][error][2023216][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:24:11.162658][error][2023216][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:24:11.262799][error][2023216][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:24:11.413176][error][2023216][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:24:11.513320][error][2023216][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:24:11.663596][error][2023216][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:24:11.763734][error][2023216][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:24:11.914004][error][2023216][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:24:12.014154][error][2023216][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:24:12.164451][error][2023216][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:24:12.264592][error][2023216][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:24:13.241666][error][2022163][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:24:13.341820][error][2022163][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:24:13.442160][error][2023216][ObLibuvcDevicePort.cpp:281] setXu failed, error code=-1
+[08/17 23:25:12.721922][info][2043109][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/17 23:29:15.010018][info][2052032][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/18 09:24:06.477716][info][2354473][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/18 10:46:56.537107][info][2455706][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/18 20:27:44.184389][info][2948293][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/18 22:59:07.356247][info][3193177][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)

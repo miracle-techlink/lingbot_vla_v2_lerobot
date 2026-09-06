@@ -1,0 +1,176 @@
+\documentclass[11pt]{ctexart}
+\input{cnreport-preamble}
+
+\renewcommand{\runningtitle}{LingBot-VLA 2.0 LeRobot 移植交接}
+\renewcommand{\reportdate}{2026 年 8 月 26 日}
+\renewcommand{\reportfooter}{LingBot-VLA 移植工作组 · 内部交接}
+
+\begin{document}
+
+\reporthead{内部交接 · 供代码 Review}{2026 年 8 月 26 日}
+{LingBot-VLA 2.0 的 LeRobot 移植:代码逻辑、上游适配与框架适配}
+{给内部同学的代码导读——这套移植怎么读、上游权重怎么来的、怎么长在 lerobot 里}
+{LingBot-VLA 移植工作组 \quad 代码:\texttt{lingbot-lerobot-final}(私有)主干 \texttt{2902c42} \quad 上游 PR:huggingface/lerobot \#3967}
+
+\begin{cnabstract}
+本文是 LingBot-VLA 2.0 LeRobot 移植的代码交接导读,面向要通读并 review 这套代码的内部同学。全文回答三个问题:\textbf{(1) 代码逻辑}——双流架构(Qwen3-VL-4B 主干 + 36 层稀疏 MoE 动作专家)如何组织成 lerobot 的 BYOP 三件套,一次推理的前向三阶段(前缀编码 $\to$ KV 复用去噪 $\to$ 反归一化)各做什么;\textbf{(2) 上游适配}——官方发布的 \texttt{robbyant/lingbot-vla-v2-6b} 权重为何不能直接加载、一次性转换器做了什么、与 transformers 原生实现的逐位数值一致性如何;\textbf{(3) 框架适配}——策略如何零特判地接入 lerobot 的 processor 注册链、训练/推理入口与多卡路线。附一页性能速查与已知边界。数值上与上游逐位等价,CI 全绿,唯一未闭环项为 RoboTwin 闭环 port 级复评。
+\end{cnabstract}
+\keywords{VLA;LingBot-VLA 2.0;lerobot BYOP;流匹配;稀疏 MoE;checkpoint 转换;逐位一致性}
+
+\section{一页总览}
+
+\textbf{是什么。}LingBot-VLA 2.0 是 pi0 式双流 VLA:Qwen3-VL-4B-Instruct 作视觉-语言主干,并联一个 36 层(hidden 768)的 Qwen2 动作专家,其\textbf{全部 36 层}均为稀疏 MoE(32 专家、top-4 路由、专家中间维 512、共享专家 704);动作由流匹配生成,默认 10 步 Euler 去噪,一次输出 chunk 50。全模型 6.23B 参数。本移植将其以 lerobot BYOP(Build-Your-Own-Policy)形式落为策略 \texttt{lingbot\_vla\_v2}。
+
+\textbf{交付态}(截至 2026-08-26):
+
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item huggingface/lerobot PR \#3967:四轮 review 意见\textbf{全部清零}(细节见仓库内 \texttt{PR3967\_REVIEW\_TODO\_20260826.md}),CI 全绿(pre-commit 19 hooks + pytest 422 passed / 18 skipped);
+  \item 私有存档库 \texttt{miracle-techlink/lingbot-lerobot-final}(单提交快照,即本次 review 对象);
+  \item 数值一致性:与 transformers 4.57 原生前向\textbf{逐位等价}(唯一残差为 triton fused\_moe kernel 内部 MMA $\approx$0.06,良性)。
+\end{itemize}
+
+\textbf{端到端数据流}(一次 \texttt{predict\_action\_chunk}):
+
+\begin{center}\small
+\setlength{\fboxsep}{3pt}
+\fcolorbox{rule}{codebg}{%
+\begin{minipage}{0.94\linewidth}\centering\ttfamily
+obs(相机$\times$N / state / task 文本)\\
+$\downarrow$~PreProcessor:\texttt{tokenizer} + Qwen 图像预处理(GPU 可选)+ \texttt{FeatureTransform.apply}(slot 映射 + 归一化)\\
+$\downarrow$~\texttt{embed\_prefix}:vision tower 编码图像 + 文本 $\to$ 36 层前缀 KV cache(\textbf{每次推理仅一次})\\
+$\downarrow$~去噪环 $\times$ \texttt{num\_steps}(默认10):\texttt{predict\_velocity} 逐步走专家流——每层注意力复用前缀 KV + MoE FFN\\
+$\downarrow$~速度场 ODE 积分 $\to$ action chunk(1, 50, action\_dim)\\
+$\downarrow$~PostProcessor:\texttt{FeatureTransform.unapply}(canonical $\to$ 机器人关节空间,反归一化;缺配置即 raise)
+\end{minipage}}
+\end{center}
+
+\section{代码逻辑}
+
+\subsection{文件地图}
+
+代码在 \texttt{src/lerobot/policies/lingbot\_vla\_v2/} 下,按 lerobot BYOP 惯例组织:
+
+\begin{table}[htbp]\centering\small
+\caption{文件职责一览(review 按此表定位)}
+\begin{tabular}{@{}lp{10.6cm}@{}}
+\toprule
+\textbf{文件} & \textbf{职责} \\
+\midrule
+\texttt{configuration\_*.py} & 策略配置(draccus 注册,\texttt{type: lingbot\_vla\_v2})。\texttt{resolve\_robot\_config\_and\_stats} 做"显式路径优先、内嵌内容兜底"的资产解析;\texttt{build\_feature\_transform\_configs} 是 apply/unapply 两侧共用的\textbf{单一配置来源};\texttt{\_save\_pretrained} 在保存时清空机器本地路径字段,保证 checkpoint 自包含 \\
+\texttt{modeling\_*.py} & \texttt{LingbotVLAV2Policy} 与内部 \texttt{LingBotVLAFlowMatchingModel}:前缀编码、KV cache 生命周期、去噪环、\texttt{\_postprocess\_actions} 反归一化(反归一化器构建失败\textbf{直接 raise},绝不静默输出归一化值——真机上等于任意关节命令) \\
+\texttt{processor\_*.py} & ProcessorStep 管线:pre(tokenize + Qwen 图像预处理 + DeviceProcessorStep)/ post(unapply);提供 \texttt{make\_*\_pre\_post\_processors\_from\_pretrained},支持 config 派生的 \texttt{feature\_step\_overrides} 注入 \\
+\texttt{feature\_transform.py} & \texttt{FeatureTransform}:55 维 canonical 空间(\texttt{max\_state\_dim}/\texttt{max\_action\_dim} 定长 padding)的 slot 映射、逐 slot 归一化统计、apply/unapply 双向 \\
+\texttt{qwen3vl\_in\_vla.py} & vendored Qwen3-VL 塔 + VLM 解码层。改造点:双流 forward 与前缀 KV 注入(这是 transformers 里没有的部分) \\
+\texttt{qwen2\_action\_expert.py} & vendored Qwen2 动作专家层:含 fused 布局 MoE 与小 batch 稠密双 GEMM 路径 \\
+\texttt{convert\_upstream\_checkpoint.py} & 一次性转换器(见 §3) \\
+\texttt{configuration\_*\_internal.py} & 上游兼容配置(\texttt{architectures} 指向 FlowMatching / FlowMatchingV2) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{前向三阶段}
+
+\textbf{(1) 前缀编码}(\texttt{embed\_prefix},每次推理一次):图像经 vision tower 得视觉 token(grid-thw 可由 \texttt{precompute\_grid\_thw} 预计算缓存),与文本 token 拼接,过 VLM 主干各层,把 36 层的 K/V 写入前缀 cache。此后整个去噪过程不再触碰主干权重。
+
+\textbf{(2) 去噪环}(\texttt{predict\_velocity} $\times$ \texttt{num\_steps}):动作侧只有 51 个 suffix token(state 1 + action chunk 50)。每步把带噪动作嵌入送入专家流,每层\textbf{注意力复用前缀 KV}(cross-attention 语义,但实现为同一序列的前缀后缀拼接)、FFN 走 MoE top-4;得到速度场后 Euler 积分。步数是质量-延迟旋钮(4/7/10 实测见 §5)。
+
+\textbf{(3) 反归一化}:输出从 55 维 canonical 空间经 \texttt{unapply} 回到具体机器人关节空间并反归一化。apply 与 unapply 共用 \texttt{build\_feature\_transform\_configs} 生成的同一份配置——两侧若各自手写会漂移(actions 在 A 布局下生成、B 布局下反归一化),这是 review 抓出并修掉的真实风险点。
+
+\subsection{关键机制速记}
+
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{MoE 两条路}:checkpoint 原生 fused(按专家维堆叠)布局;当 $B{\times}T \le 512$ 时自动走稠密双 GEMM 纯 PyTorch 路径——两个 GEMM 算完 32 专家、top-4 权重折叠进 down GEMM,无路由 kernel、静态形状、dynamo 可整图追踪(与精确路由代数等价,fp32 相对差 1.4e-6)。
+  \item \textbf{attention 三实现}:eager / sdpa / flex(flex$\to$triton 编译)。训练推荐 sdpa+bf16;推理 compile 下 eager 与 sdpa 等价;\texttt{fa2} 在上游即 NotImplementedError。
+  \item \textbf{加速旋钮}(默认关):\texttt{use\_cudagraph\_denoise}(CUDA graph 捕去噪环,空 cache 捕获)、\texttt{preprocess\_device=cuda}、\texttt{compile\_predict\_velocity}。终烘配方见 §5。
+\end{itemize}
+
+\section{上游适配:robbyant 权重 $\to$ LeRobot checkpoint}
+
+\textbf{为什么必须转换。}官方发布物 \texttt{robbyant/lingbot-vla-v2-6b} 的 \texttt{config.json} 只有一行 \texttt{\{"vlm\_family": "qwen3\_v1"\}}——全部架构信息住在官方训练脚本里,任何标准加载器都无法重建模型。早期版本用过"运行时 sniffer + raw loader",但 reviewer 正确指出这会把 4 个特判分支打进 lerobot 核心文件,且 sniffer 会误认别人的 checkpoint;最终方案是\textbf{一次性转换 + 零特判}。
+
+\textbf{转换器做什么}(\texttt{convert\_upstream\_checkpoint.py},跑一次):
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item 重打 \texttt{config.json}:\texttt{type: lingbot\_vla\_v2} + 全部结构 override——从此走标准 \texttt{from\_pretrained},多卡加载自动带 \#4042 修复;
+  \item 权重切分:1708 张量 $\to$ \textbf{1624 加载 + 84 显式剔除}(depth 对齐 / 视频蒸馏头,\texttt{use\_depth=False};在转换期一次剔除并记录,而非每次加载静默跳过);strict 加载 0 missing / 0 unexpected;
+  \item 内嵌机器人资产:\texttt{robot\_config} 与 \texttt{norm\_stats} 内容写进 config 与 processor JSON,保存时清空路径字段 $\Rightarrow$ checkpoint 拷到任何机器都能重载(自包含)。
+\end{itemize}
+
+\textbf{数值一致性}(转换正确性的证据):同权重同输入同噪声,transformers 4.57 原生实现 vs 本移植,前缀 embeddings、全层 KV cache、suffix/时间嵌入、MoE router logits、top-4 选中专家全部 \textbf{max$|\Delta|$=0}(bf16 与 fp32 逐位一致)。唯一残差在 vendored triton \texttt{fused\_moe} 的 SwiGLU 内部($\approx$0.06/块),属 kernel 内部低精度 MMA 的良性差异,非结构或加载缺陷。
+
+\textbf{与 transformers 的复用边界}:能用 transformers 的(Qwen3-VL 配置与构件、Qwen2 层、tokenizer/processor)直接用;留在 LeRobot 的是上游没有的部分——双流 forward、前缀 KV 注入、流匹配动作头、MoE 专家逻辑。vendored 文件顶部有来源标注。
+
+\section{LeRobot 框架适配}
+
+\textbf{BYOP 合规}:\texttt{policies/lingbot\_vla\_v2/} 三件套(configuration / modeling / processor)+ \texttt{README.md} 软链到 \texttt{docs/source/policy\_lingbot\_vla\_v2\_README.md} + \texttt{lingbot\_vla\_v2.mdx}(含 Benchmark 章节与复现命令)+ 根 README 模型表 + modelcard 模板条目。
+
+\textbf{Processor 体系接入}:
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \texttt{ProcessorStep} 注册走\textbf{包导入链}:包内 \texttt{\_\_init\_\_.py} 导出 configuration/modeling/processor 三模块(与其他 21 个策略一致),\texttt{import lerobot.policies} 即注册全部 60 个 step,含 \texttt{lingbot\_vla\_2\_feature\_transform}——factory 里为此曾存在的通用 importlib 补丁块已删除;
+  \item 管线经 \texttt{PolicyProcessorPipeline.from\_pretrained} 加载;config 派生的 \texttt{feature\_step\_overrides} 注入,使\textbf{新本体 fine-tune 能覆盖 checkpoint 里的槽映射};
+  \item lerobot 通用 normalizer override 在此被过滤——本策略归一化在 \texttt{FeatureTransform} 内,不另设 normalizer step(过滤逻辑在 lingbot processor 模块内,不污染共享代码)。
+\end{itemize}
+
+\textbf{零特判}:\texttt{configs/policies.py}、\texttt{factory.py}、\texttt{lerobot\_train.py}、\texttt{lerobot\_eval.py} 四个核心文件中 lingbot 特判为 \textbf{0 处};processor 工厂按 isinstance 分发(与 Groot/Evo1 同款);\texttt{\_no\_split\_modules} 登记真实层类名,FSDP \texttt{TRANSFORMER\_BASED\_WRAP} 开箱即用。
+
+\textbf{训练 / 推理入口}:
+\begin{table}[htbp]\centering\small
+\begin{tabular}{@{}llp{7.2cm}@{}}
+\toprule
+\textbf{入口} & \textbf{路线} & \textbf{状态} \\
+\midrule
+\texttt{lerobot-train} & FSDP1 & 8$\times$A100 干净起训(5.8B/6.2B 可训练,loss $\sim$0.6) \\
+ & FSDP2 & 2$\times$4090 冒烟通过(auto-wrap + offload) \\
+ & DDP & 2$\to$4 卡线性扩展,8 卡 30k 步 $\approx$ 9--11 h \\
+ & LoRA & 社区 PEFT 三钩子路线,单卡 12.4 GB,冒烟通过 \\
+\texttt{lerobot-eval} / \texttt{lerobot-rollout} & 标准 & \texttt{predict\_action\_chunk} 返回 (1, 50, 6),数据集单位 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{性能速查与已知边界}
+
+\begin{table}[htbp]\centering\small
+\caption{性能速查(详报:\texttt{lingbot\_vla\_v2\_total\_report.pdf} 与 \texttt{$\sim$/reports/} 汇总)}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{项} & \textbf{数字} & \textbf{对照} \\
+\midrule
+数值一致性 & 1624 keys 0/0;前缀/KV/router 全逐位 & transformers 4.57 原生 \\
+训练 e2e(A100, B=2) & 2378 $\to$ \upgood{1137 ms(-52\%)} & PR 原版 $\to$ sdpa+bf16+fused AdamW \\
+训练吞吐 & B=3 \upgood{1.99 samples/s};LoRA 12.4 GB/卡 & A100-80G \\
+推理 e2e(A100) & 1705 $\to$ \upgood{436.6 ms(3.9$\times$)} & 官方 deploy eager $\to$ 本移植优化栈 \\
+推理(4090, 终烘) & \upgood{130.17 ms}(7步+CUDA graph) & 官方 130 ms 口径复现;4/7/10 步 = 108.5/130.9/153.0 \\
+推理(GB10) & 635 / 752 ms(4步/7步) & 带宽地板:273 GB/s,130ms 物理不可达 \\
+真机 RTC 云端推理 & 60 s 49 次 0 错;RTT p50 822 $\to$ 630 ms & q75 量化 + threshold 30 + horizon 24 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{已知边界}(review 时请知悉):
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{RoboTwin 闭环 port 级复评未完成}:官方权重上游成绩 Clean 93.52\% / Randomized 92.80\%;本移植的闭环初评 0/12 已定位为评测基建问题(评测 ckpt 内嵌慢配置),待快配置重导出后重评——这是当前\textbf{唯一}未闭环的验证项;
+  \item depth / 视频蒸馏分支在本 checkpoint 不可达(\texttt{use\_depth=False},84 张量已显式剔除),如需启用走 follow-up;
+  \item reviewer 认可延后的 8 项 cosmetic follow-up(process-wide transformers patch、asserts 收敛、license 头、文件重组等)见 TODO 文档 queued 一节;
+  \item 四轮 PR review 已全部清零,逐条对照表:\texttt{PR3967\_REVIEW\_TODO\_20260826.md}(仓库根)。
+\end{itemize}
+
+\section*{附录:代码位置速查}
+\begin{table}[htbp]\centering\small
+\begin{tabular}{@{}p{4.6cm}p{9.4cm}@{}}
+\toprule
+\textbf{想看什么} & \textbf{去哪} \\
+\midrule
+双流前向 / KV 注入 & \texttt{modeling\_lingbot\_vla\_v2.py}(\texttt{LingBotVLAFlowMatchingModel})+ \texttt{qwen3vl\_in\_vla.py} \\
+去噪环 / 速度场 & \texttt{modeling} 中 \texttt{predict\_velocity};CUDA graph 路径同文件 \\
+图像 / 文本预处理 & \texttt{processor\_lingbot\_vla\_v2.py}(管线)+ \texttt{feature\_transform.py}(apply) \\
+归一化 / slot 映射 & \texttt{feature\_transform.py}(\texttt{FeatureTransform.apply/unapply}) \\
+MoE 专家实现 & \texttt{qwen2\_action\_expert.py}(fused 布局 + 稠密双 GEMM) \\
+checkpoint 转换 & \texttt{convert\_upstream\_checkpoint.py} \\
+训练配方 / 4090 配置 & \texttt{docs/source/lingbot\_vla\_v2.mdx};\texttt{bench/robotwin/} \\
+\midrule
+外部指针 & 私有库 \texttt{lingbot-lerobot-final};PR \#3967;\texttt{$\sim$/reports/lingbot-vla-v2-训练推理评测汇总-20260826.md};加速详报 \texttt{docs/accel/lingbot\_vla\_v2\_total\_report.pdf} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}
