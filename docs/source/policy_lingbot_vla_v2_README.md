@@ -25,6 +25,11 @@ pip install "lerobot[lingbot_vla2]"
 lerobot-info
 ```
 
+> Requires Python ≥3.12. `flash-attn` is optional (the sdpa/eager attention
+> fallbacks are used when it is absent); the distillation teachers and the
+> feature-transform tests expect the Qwen3-VL processor files locally (see
+> [Model & Teacher Weights](#model--teacher-weights)).
+
 ## Model & Teacher Weights
 
 All weights are hosted on [Hugging Face](https://huggingface.co) and, where marked, mirrored on [ModelScope](https://modelscope.cn). The base checkpoint is gated on HF — request access first; the ModelScope mirror is an alternative.
@@ -160,7 +165,13 @@ bash experiment/robotwin/start_robotwin_infer_and_eval.sh \
   --num_tasks 1 --num_gpus 1 --num_per_gpu 1   # smoke; --num_tasks 50 for the full benchmark
 ```
 
-The policy can also be evaluated through LeRobot's native RoboTwin env (`lerobot-eval --env.type=robotwin --env.task=<task> --policy.path=<ckpt>`); the official websocket client above is what reproduces the published benchmark numbers.
+> **Two RoboTwin eval paths exist.** `lerobot-eval --env.type=robotwin --env.task=<task>
+> --policy.path=<ckpt>` runs the policy through LeRobot's native RoboTwin env — note it
+> emits the env's camera keys (`head_camera`/`left_camera`/`right_camera`), so it needs a
+> robot config that maps those onto the canonical slots. The **official RoboTwin
+> websocket client** (step 4 above) drives the unchanged upstream benchmark harness; the
+> published benchmark numbers use the official client so they stay comparable with the
+> RoboTwin leaderboard.
 
 ### Path B — Real-Robot Fine-Tuning (`--profile real`): fast, light
 
@@ -217,6 +228,15 @@ Acceptance: `depth_loss`, `future_depth_loss`, and `future_video_loss` all appea
 **3. Deploy** — see [Inference & Deployment](#inference--deployment) below (`lerobot-rollout` on the robot).
 
 A validated 2×24GB FSDP2 path also exists (Accelerate `fully_shard` with a CPU-offloaded optimizer, gradient checkpointing, validated robot config, and embedded norm stats).
+
+### Optimizer
+
+The default recipe uses AdamW and is fully supported. A Muon-based optimizer
+(`--policy.optimizer_type=muon`) matching the upstream training recipe is provided by
+the standalone Muon PR — it implements the 3D-MoE / FSDP2-distributed Muon that
+`torch.optim.Muon` does not (batched Newton–Schulz over expert stacks, sharded-parameter
+mega-batching). The benchmark numbers in this README were produced with the default
+AdamW recipe unless a checkpoint notes otherwise.
 
 ## Inference & Deployment
 
