@@ -52,18 +52,19 @@ def _slot_mappings_to_robot_config(config: "LingbotVLAV2Config") -> dict | None:
     return robot_config if robot_config else None
 
 
-def resolve_robot_config_and_stats(config: "LingbotVLAV2Config") -> None:
-    """Build ``config.robot_config`` from the dataclass slot-mapping fields.
+def resolve_robot_config_and_stats(config: "LingbotVLAV2Config") -> dict | None:
+    """Build the robot_config dict from the dataclass slot-mapping fields.
 
     The slot mappings (state_slots / action_slots) are the canonical source — they
     live in config.json as typed fields with CLI override and validation. The
     robot_config dict is derived from them for the processor's slot-mapping step.
     norm_stats are either embedded in the checkpoint or derived from the dataset at
     training time. Camera renames are handled by ``--rename_map``.
+
+    Returns the robot_config dict (or None if no slot mappings are defined), without
+    mutating the config.
     """
-    derived = _slot_mappings_to_robot_config(config)
-    if derived is not None:
-        config.robot_config = derived
+    return _slot_mappings_to_robot_config(config)
 
 
 @dataclass
@@ -163,10 +164,6 @@ class LingbotVLAV2Config(PreTrainedConfig):
     # Normalization stats live in the processor's state (NormalizerProcessorStep),
     # not in the config — training derives them from dataset_stats, inference reads
     # them from the checkpoint's policy_preprocessor.json.
-    # Derived from state_slots/action_slots by
-    # resolve_robot_config_and_stats(); consumed by the processor's slot-mapping step.
-    # Not serialized directly — the slot-mapping fields above are the canonical source.
-    robot_config: dict | None = None
     # Path (or hub id) to the Qwen3-VL processor (image processor + tokenizer). Falls
     # back to ``tokenizer_path`` when None.
     processor_path: str | None = None

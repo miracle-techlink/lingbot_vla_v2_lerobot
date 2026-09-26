@@ -858,11 +858,11 @@ def make_lingbot_vla_v2_pre_post_processors(
     3. Neither → identity passthrough: the steps are present but normalization
        is a no-op.
     """
-    resolve_robot_config_and_stats(config)
-    if not config.robot_config:
+    robot_config = resolve_robot_config_and_stats(config)
+    if not robot_config:
         # No slot mappings provided (format-only converted checkpoint): use identity
         # passthrough — raw features are assumed to already be in canonical layout.
-        config.robot_config = _make_identity_robot_config(config)
+        robot_config = _make_identity_robot_config(config)
 
     norm_map = _resolve_norm_map(config.canonical_norm_type)
     stats = (
@@ -877,7 +877,7 @@ def make_lingbot_vla_v2_pre_post_processors(
     )
 
     slot_step = LingbotVLAV2SlotMappingProcessorStep(
-        robot_config=config.robot_config,
+        robot_config=robot_config,
         canonical_joints=config.canonical_joints,
         cameras=config.canonical_cameras,
         chunk_size=config.chunk_size,
@@ -924,7 +924,7 @@ def make_lingbot_vla_v2_pre_post_processors(
     ]
     output_steps: list[ProcessorStep] = [
         LingbotVLAV2InverseSlotMappingProcessorStep(
-            robot_config=config.robot_config,
+            robot_config=robot_config,
             canonical_joints=config.canonical_joints,
             slot_mapping_step=slot_step,
         ),
@@ -983,7 +983,7 @@ def make_lingbot_vla_v2_pre_post_processors_from_pretrained(
     if "device_processor" not in postprocessor_overrides and "device_processor" in preprocessor_overrides:
         postprocessor_overrides["device_processor"] = preprocessor_overrides["device_processor"]
 
-    resolve_robot_config_and_stats(config)
+    robot_config = resolve_robot_config_and_stats(config)
 
     # Same config → step parameter set as ``make_lingbot_vla_v2_pre_post_processors``
     # (paths excluded: their resolved contents are forwarded instead). Only fields the
@@ -996,7 +996,7 @@ def make_lingbot_vla_v2_pre_post_processors_from_pretrained(
     _overrides(
         SLOT_MAPPING_STEP,
         {
-            "robot_config": config.robot_config,
+            "robot_config": robot_config,
             "canonical_joints": config.canonical_joints,
             "cameras": config.canonical_cameras,
             "chunk_size": config.chunk_size,
