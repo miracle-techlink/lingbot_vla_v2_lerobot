@@ -101,22 +101,12 @@ python -m lerobot.policies.lingbot_vla_v2.scripts.robotwin_to_lerobot \
   --fps 15 --mode video
 ```
 
-**2. Norm stats** (`bounds_99_woclip` needs the `q01/q99` quantiles):
-
-```bash
-python -m lerobot.policies.lingbot_vla_v2.scripts.gen_rebot_norm_stats \
-  --dataset-root /path/to/lerobot_dataset \
-  --quantiles --out norm_stats.robotwin.json
-```
-
-**3. Convert + train** (bakes `L1_fm` loss + `bounds_99_woclip` normalization):
+**2. Convert + train** (bakes `L1_fm` loss + `bounds_99_woclip` normalization; norm stats are derived from the dataset automatically):
 
 ```bash
 python -m lerobot.policies.lingbot_vla_v2.scripts.convert_upstream_checkpoint \
   --input robbyant/lingbot-vla-v2-6b \
   --output ./lingbot-robotwin-6b \
-  --robot-config-path robotwin.yaml \
-  --norm-stats-path norm_stats.robotwin.json \
   --profile robotwin
 ```
 
@@ -143,35 +133,29 @@ lerobot-train \
 torchrun --nproc_per_node=8 -m lerobot.scripts.lerobot_train <same args>
 ```
 
-FSDP2 — add the sharding degree and the wrap-unit classes, with `--policy.dtype=float32` (the old `accelerate launch --config_file` flow is superseded on this branch; mixed precision under sharding supports `no`/`bf16` only):
+FSDP2 — add the sharding degree and mixed precision (the policy declares `_fsdp_wrap_modules`, so no manual wrap-modules flag needed):
 
 ```bash
 torchrun --nproc_per_node=8 -m lerobot.scripts.lerobot_train <same args> \
   --parallelism.dp_shard=-1 \
-  --accelerator.fsdp.wrap_modules='["Qwen3VLTextDecoderLayer","Qwen3VLVisionBlock","Qwen2DecoderLayer"]'
+  --accelerator.mixed_precision=bf16
 ```
 
 Smoke-test with 2 processes × 20 steps before scaling up.
 
-**4. Evaluate** on the official benchmark: copy `src/lerobot/policies/lingbot_vla_v2/scripts/lingbot_vla_v2_policy_lerobot.py` into the RoboTwin checkout's `deploy/`, then point the **unchanged** official launcher at it:
+**4. Evaluate** through LeRobot's native RoboTwin env:
 
 ```bash
-bash experiment/robotwin/start_robotwin_infer_and_eval.sh \
-  --model_path ./lingbot-robotwin-6b \
-  --eval_workdir /path/to/RoboTwin \
-  --inference_script deploy/lingbot_vla_v2_policy_lerobot.py \
-  --conda_sh /path/to/miniconda3/etc/profile.d/conda.sh \
-  --inference_env lerobot --sim_env RoboTwin \
-  --num_tasks 1 --num_gpus 1 --num_per_gpu 1   # smoke; --num_tasks 50 for the full benchmark
+lerobot-eval \
+  --policy.path=./lingbot-robotwin-6b \
+  --env.type=robotwin \
+  --env.task=beat_block_hammer \
+  --eval.batch_size=1 \
+  --eval.n_episodes=5 \
+  --rename_map='{"observation.images.head_camera": "observation.images.cam_high", "observation.images.left_camera": "observation.images.cam_left_wrist", "observation.images.right_camera": "observation.images.cam_right_wrist"}'
 ```
 
-> **Two RoboTwin eval paths exist.** `lerobot-eval --env.type=robotwin --env.task=<task>
-> --policy.path=<ckpt>` runs the policy through LeRobot's native RoboTwin env — note it
-> emits the env's camera keys (`head_camera`/`left_camera`/`right_camera`), so it needs a
-> robot config that maps those onto the canonical slots. The **official RoboTwin
-> websocket client** (step 4 above) drives the unchanged upstream benchmark harness; the
-> published benchmark numbers use the official client so they stay comparable with the
-> RoboTwin leaderboard.
+> The `--rename_map` maps the env's camera keys (`head_camera`/`left_camera`/`right_camera`) onto the checkpoint's expected keys (`cam_high`/`cam_left_wrist`/`cam_right_wrist`).
 
 ### Path B — Real-Robot Fine-Tuning (`--profile real`): fast, light
 
@@ -211,7 +195,7 @@ torchrun --nproc_per_node=8 -m lerobot.scripts.lerobot_train <same args, --batch
 **LoRA (optional).** Add two flags to either command to train expert-only LoRA adapters (~0.2B parameters instead of 6B):
 
 ```bash
-lerobot-train <same args> --policy.use_peft=true --policy.peft.r=32
+lerobot-train <same args> --peft.use_peft=true --peft.r=32
 ```
 
 Merge adapter checkpoints back into the base weights with `scripts/export_merged.py` before deployment.
@@ -220,7 +204,7 @@ Merge adapter checkpoints back into the base weights with `scripts/export_merged
 
 ```bash
 torchrun --nproc_per_node=N -m lerobot.scripts.lerobot_train <same args> \
-  --policy.use_depth=true --policy.dataset_fps=<dataset fps>
+  --policy.dataset_fps=<dataset fps>
 ```
 
 Acceptance: `depth_loss`, `future_depth_loss`, and `future_video_loss` all appear in the training logs. Teacher weights are listed in [Model & Teacher Weights](#model--teacher-weights); the distillation walkthrough is in [`lingbot_vla_v2.mdx`](./lingbot_vla_v2.mdx).
@@ -275,9 +259,9 @@ Inference speed is baked into the checkpoint's `config.json` — sparse MoE rout
 
 ## Adapting to a New Embodiment
 
-Fine-tuning on a robot the checkpoint was not converted for requires only two new assets — a robot-config YAML and a norm-stats JSON — passed as `--policy.robot_config_path` / `--policy.norm_stats_path`. Explicit paths take precedence over the assets embedded in the checkpoint (a warning is logged when they differ), and checkpoints saved during fine-tuning embed the new assets so they remain self-contained.
+Fine-tuning on a robot the checkpoint was not converted for requires only the slot mappings — passed as `--policy.state_slots` / `--policy.action_slots` (typed dict fields). The norm stats are derived from the dataset automatically (LeRobot's `dataset_stats` mechanism), and checkpoints saved during fine-tuning embed the slot mappings so they remain self-contained.
 
-The canonical slot vocabulary (the 55-D layout, per-slot normalization modes), how to derive the norm-stats JSON for a custom dataset, and the native-depth / DINO-video distillation setup are covered in the full walkthrough: [`lingbot_vla_v2.mdx`](./lingbot_vla_v2.mdx).
+The canonical slot vocabulary (the 55-D layout, per-slot normalization modes), how the norm stats are derived, and the native-depth / DINO-video distillation setup are covered in the full walkthrough: [`lingbot_vla_v2.mdx`](./lingbot_vla_v2.mdx).
 
 ## Citation
 

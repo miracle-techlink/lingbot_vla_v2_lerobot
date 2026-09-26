@@ -74,9 +74,10 @@ repo if you pushed it). Do not pass `policy.type` in that command; LeRobot infer
 LingBot-VLA 2.0 also requires the per-robot slot mapping and normalization assets used by
 its feature transform:
 
-- `policy.robot_config_path`: YAML mapping dataset state/action/image keys onto canonical slots.
-- `policy.norm_stats_path`: JSON normalization statistics for those canonical slots.
-- `policy.processor_path` / `policy.tokenizer_path`: Qwen3-VL processor/tokenizer path or Hub id.
+- `policy.state_slots` / `policy.action_slots`: typed dict fields mapping dataset state/action keys onto canonical slots (replaces the old YAML robot config).
+- `policy.processor_path`: Qwen3-VL processor/tokenizer path or Hub id (tokenizer_path is deprecated, use processor_path).
+
+Norm stats are derived from the dataset automatically (LeRobot's `dataset_stats` mechanism) — no separate norm-stats file needed.
 
 ## Checkpoints
 
@@ -94,9 +95,8 @@ lerobot-train \
   --dataset.repo_id=<your/dataset> \
   --policy.path=<converted-lingbot-vla-v2-6b> \
   --policy.repo_id=<your/lingbot_vla_v2_policy> \
-  --policy.robot_config_path=/path/to/robot_config.yaml \
-  --policy.norm_stats_path=/path/to/norm_stats.json \
-  --policy.tokenizer_path=Qwen/Qwen3-VL-4B-Instruct \
+  --policy.state_slots='{"observation.state.arm.position": {"origin_keys": [{"observation.state": {"start": 0, "end": 6}}]}}' \
+  --policy.action_slots='{"action.arm.position": {"origin_keys": [{"action": {"start": 0, "end": 6}}], "subtract_state": false}}' \
   --policy.processor_path=Qwen/Qwen3-VL-4B-Instruct \
   --policy.dtype=bfloat16 \
   --policy.attention_implementation=sdpa \
@@ -122,10 +122,9 @@ the policy has been run with 4-way FSDP on 24 GB cards (cap `image_max_pixels` a
 
 | Parameter                               | Default                     | Description                                                                                                      |
 | --------------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `robot_config_path`                     | `null`                      | Required YAML mapping dataset keys into the 55-D canonical LingBot slots.                                        |
-| `norm_stats_path`                       | `null`                      | Required per-slot normalization stats JSON used by the feature transform.                                        |
-| `processor_path`                        | `null`                      | Qwen3-VL processor path; falls back to `tokenizer_path` when omitted.                                            |
-| `tokenizer_path`                        | `Qwen/Qwen3-VL-4B-Instruct` | Qwen3-VL tokenizer/config source. Use a local path when the training node cannot access the Hub.                 |
+| `state_slots`                           | `null`                      | Typed dict mapping dataset state keys into the 55-D canonical LingBot slots.                                     |
+| `action_slots`                          | `null`                      | Typed dict mapping dataset action keys into the 55-D canonical LingBot slots.                                    |
+| `processor_path`                        | `Qwen/Qwen3-VL-4B-Instruct` | Qwen3-VL processor/tokenizer path or Hub id. Use a local path when the training node cannot access the Hub.      |
 | `dtype`                                 | `bfloat16`                  | Model dtype; LeRobot maps this to Accelerate mixed precision. Use `float32` for CPU smoke tests.                 |
 | `attention_implementation`              | `sdpa`                      | Action-stream attention backend: `eager`, `sdpa`, `fa2`, `flex`, or `flex_cached`.                               |
 | `vit_attn_implementation`               | `sdpa`                      | Qwen3-VL vision attention backend; use Hugging Face names such as `eager`, `sdpa`, or `flash_attention_2`.       |
@@ -155,16 +154,18 @@ is the default for checkpoint compatibility.
 Example 8-GPU launch:
 
 ```bash
-accelerate launch --num_processes=8 $(which lerobot-train) \
+torchrun --nproc_per_node=8 -m lerobot.scripts.lerobot_train \
   --dataset.repo_id=<your/dataset> \
   --policy.path=<converted-lingbot-vla-v2-6b> \
-  --policy.robot_config_path=/path/to/robot_config.yaml \
-  --policy.norm_stats_path=/path/to/norm_stats.json \
+  --policy.state_slots='{"observation.state.arm.position": {"origin_keys": [{"observation.state": {"start": 0, "end": 6}}]}}' \
+  --policy.action_slots='{"action.arm.position": {"origin_keys": [{"action": {"start": 0, "end": 6}}], "subtract_state": false}}' \
   --policy.dtype=bfloat16 \
   --policy.attention_implementation=sdpa \
   --policy.vit_attn_implementation=sdpa \
   --policy.moe_implementation=fused \
   --policy.loss_type=L1_fm \
+  --parallelism.dp_shard=-1 \
+  --accelerator.mixed_precision=bf16 \
   --batch_size=1 \
   --steps=40000
 ```
@@ -172,15 +173,16 @@ accelerate launch --num_processes=8 $(which lerobot-train) \
 ## Data format
 
 Raw per-embodiment features are mapped onto the trained 55-D canonical slots by the
-robot-config YAML consumed by the feature transform (`states` / `actions` map dataset keys to
-canonical joints, `images` rename cameras). Missing source keys are warned once per canonical
-slot, but the robot config must still match the checkpoint's canonical layout to avoid wrong
-padding or normalization.
+typed slot mappings (`state_slots` / `action_slots`) in the config. Missing source keys
+are warned once per canonical slot, but the slot mappings must still match the
+checkpoint's canonical layout to avoid wrong padding or normalization.
 
 When fine-tuning a converted checkpoint on a **new** embodiment, the explicit
-`--policy.robot_config_path` / `--policy.norm_stats_path` take precedence over the assets
-embedded in the checkpoint (a warning is logged when they differ). Checkpoints saved during
-fine-tuning embed the new assets, so they stay self-contained and portable.
+`--policy.state_slots` / `--policy.action_slots` take precedence over the assets
+embedded in the checkpoint (a warning is logged when they differ). Checkpoints saved
+during fine-tuning embed the new slot mappings, so they stay self-contained and portable.
+Norm stats are derived from the dataset automatically (LeRobot's `dataset_stats`
+mechanism) and embedded in the processor's state.
 
 ## Example: adapting to a single-arm robot
 
