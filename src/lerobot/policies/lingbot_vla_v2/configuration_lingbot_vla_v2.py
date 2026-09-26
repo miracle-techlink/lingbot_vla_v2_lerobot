@@ -28,7 +28,8 @@ def _slot_mappings_to_robot_config(config: "LingbotVLAV2Config") -> dict | None:
     the processor's slot-mapping step expects.
 
     Returns None if no slot mappings are defined (e.g. a format-only converted
-    checkpoint that hasn't been fine-tuned yet).
+    checkpoint that hasn't been fine-tuned yet). Camera renames are handled by
+    ``--rename_map`` at the pipeline level, not here.
     """
     robot_config: dict = {}
 
@@ -47,10 +48,6 @@ def _slot_mappings_to_robot_config(config: "LingbotVLAV2Config") -> dict | None:
             }
             for slot_key, mapping in config.action_slots.items()
         ]
-    if config.camera_mapping:
-        robot_config["images"] = [
-            {canonical: {"origin_keys": raw_key}} for canonical, raw_key in config.camera_mapping.items()
-        ]
 
     return robot_config if robot_config else None
 
@@ -58,11 +55,11 @@ def _slot_mappings_to_robot_config(config: "LingbotVLAV2Config") -> dict | None:
 def resolve_robot_config_and_stats(config: "LingbotVLAV2Config") -> None:
     """Build ``config.robot_config`` from the dataclass slot-mapping fields.
 
-    The slot mappings (state_slots / action_slots / camera_mapping) are the
-    canonical source — they live in config.json as typed fields with CLI override
-    and validation. The robot_config dict is derived from them for the processor's
-    slot-mapping step. norm_stats are either embedded in the checkpoint or derived
-    from the dataset at training time.
+    The slot mappings (state_slots / action_slots) are the canonical source — they
+    live in config.json as typed fields with CLI override and validation. The
+    robot_config dict is derived from them for the processor's slot-mapping step.
+    norm_stats are either embedded in the checkpoint or derived from the dataset at
+    training time. Camera renames are handled by ``--rename_map``.
     """
     derived = _slot_mappings_to_robot_config(config)
     if derived is not None:
@@ -161,12 +158,12 @@ class LingbotVLAV2Config(PreTrainedConfig):
     # absolute.
     use_relative_actions: bool = False
     relative_exclude_joints: list[str] = field(default_factory=list)
-    # Camera mapping: canonical camera name → raw dataset camera key.
-    camera_mapping: dict[str, str] | None = None
+    # Camera renames are handled by the standard ``--rename_map`` CLI flag, not a
+    # config field — the slot-mapping step reads the renamed features directly.
     # Embedded norm_stats (filled at save time, or derived from dataset_stats at
     # training time). Self-contained so a saved checkpoint works on any machine.
     norm_stats: dict | None = None
-    # Derived from state_slots/action_slots/camera_mapping by
+    # Derived from state_slots/action_slots by
     # resolve_robot_config_and_stats(); consumed by the processor's slot-mapping step.
     # Not serialized directly — the slot-mapping fields above are the canonical source.
     robot_config: dict | None = None

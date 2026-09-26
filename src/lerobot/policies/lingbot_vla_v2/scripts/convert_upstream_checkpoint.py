@@ -326,6 +326,7 @@ def main():
     # When --robot-config-path is omitted (format-only conversion), fall back to the
     # canonical camera list — the embodiment is decided at fine-tuning time.
     camera_keys = []
+    _robot_config = None
     if args.robot_config_path:
         import yaml
 
@@ -349,7 +350,6 @@ def main():
     # Convert robot_config YAML to typed slot-mapping fields when provided.
     state_slots = None
     action_slots = None
-    camera_mapping = None
     if args.robot_config_path:
         from ..configuration_lingbot_vla_v2 import SlotMapping
 
@@ -364,33 +364,74 @@ def main():
                     origin_keys=slot_cfg.get("origin_keys", []),
                     subtract_state=slot_cfg.get("subtract_state", False),
                 )
-        camera_mapping = {}
+
+    # Derive the robot's raw state/action dim from the slot mappings (max end across
+    # all origin_keys spans), so input_features describes the robot's features — the
+    # 55-D canonical space is an internal policy detail, not the checkpoint's interface.
+    robot_state_dim = 55
+    robot_action_dim = 55
+    if state_slots:
+        robot_state_dim = max(
+            span["end"]
+            for mapping in state_slots.values()
+            for origin in mapping.origin_keys
+            for span in origin.values()
+        )
+    if action_slots:
+        robot_action_dim = max(
+            span["end"]
+            for mapping in action_slots.values()
+            for origin in mapping.origin_keys
+            for span in origin.values()
+        )
+
+    # Camera keys: use the raw dataset/env keys (lerobot robotwin env provides
+    # head_camera/left_camera/right_camera), not the canonical names. The canonical
+    # mapping happens inside the policy's slot-mapping step.
+    raw_camera_keys = []
+    if _robot_config is not None:
         for entry in _robot_config.get("images", []):
             if isinstance(entry, str):
                 continue
-            for canonical, convert_info in entry.items():
+            for _canonical, convert_info in entry.items():
                 if isinstance(convert_info, dict):
                     raw_key = convert_info.get("origin_keys")
                     if isinstance(raw_key, str):
-                        camera_mapping[canonical] = raw_key
+                        raw_camera_keys.append(raw_key)
+    if not raw_camera_keys:
+        raw_camera_keys = [f"observation.images.{cam}" for cam in camera_keys]
+
+    # Read the per-slot norm stats (from --norm-stats-path or the robot config's
+    # norm_stats reference) and embed them into the config so the processor's
+    # NormalizerProcessorStep carries them in its state.
+    norm_stats = None
+    norm_stats_source = args.norm_stats_path
+    if norm_stats_source is None and _robot_config is not None:
+        norm_stats_source = _robot_config.get("norm_stats")
+    if norm_stats_source:
+        import json as _json
+
+        with open(norm_stats_source) as f:
+            norm_stats = _json.load(f)
+        logger.info("Loaded norm stats from %s (%d slots)", norm_stats_source, len(norm_stats.get("norm_stats", {})))
 
     config = LingbotVLAV2Config(
         tokenizer_path=args.tokenizer_path or LingbotVLAV2Config().tokenizer_path,
         state_slots=state_slots or None,
         action_slots=action_slots or None,
-        camera_mapping=camera_mapping or None,
-        # Canonical features; training re-infers them from the dataset anyway.
+        norm_stats=norm_stats,
+        # Robot features (raw dims), not the canonical 55-D space.
         input_features={
-            OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(55,)),
+            OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(robot_state_dim,)),
             **{
                 cam: PolicyFeature(
                     type=FeatureType.VISUAL,
                     shape=(3, 256, 256) if args.profile == "robotwin" else (3, 224, 224),
                 )
-                for cam in camera_keys
+                for cam in raw_camera_keys
             },
         },
-        output_features={ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(55,))},
+        output_features={ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(robot_action_dim,))},
         # Depth/DINO distillation branch: heads build from the dict (no teacher
         # weights needed at build time); the paths are validated lazily at
         # training when the frozen teachers load.

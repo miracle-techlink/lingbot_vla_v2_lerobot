@@ -110,9 +110,6 @@ def _make_tiny_config() -> LingbotVLAV2Config:
                 subtract_state=False,
             ),
         },
-        camera_mapping={
-            "observation.images.camera_top": "observation.images.camera_top",
-        },
         # Fake norm_stats for testing (mean=0, std=1)
         norm_stats={
             "norm_stats": {
