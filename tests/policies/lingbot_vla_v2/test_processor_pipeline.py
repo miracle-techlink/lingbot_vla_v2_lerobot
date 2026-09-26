@@ -85,15 +85,6 @@ def _so101_config() -> LingbotVLAV2Config:
                 subtract_state=False,
             ),
         },
-        norm_stats={
-            "norm_stats": {
-                "observation.state.arm.position": {
-                    "mean": STATE_MEAN,
-                    "std": STATE_STD,
-                },
-                "action.arm.position": {"mean": ACTION_MEAN, "std": ACTION_STD},
-            }
-        },
         input_features={
             OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(6,)),
             "observation.images.camera_top": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 480, 640)),
@@ -106,7 +97,13 @@ def _so101_config() -> LingbotVLAV2Config:
 
 @pytest.fixture
 def pipelines():
-    return make_lingbot_vla_v2_pre_post_processors(_so101_config())
+    return make_lingbot_vla_v2_pre_post_processors(
+        _so101_config(),
+        dataset_stats={
+            OBS_STATE: {"mean": STATE_MEAN, "std": STATE_STD},
+            ACTION: {"mean": ACTION_MEAN, "std": ACTION_STD},
+        },
+    )
 
 
 def _so101_item():

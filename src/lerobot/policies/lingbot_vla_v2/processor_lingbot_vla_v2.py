@@ -852,8 +852,9 @@ def make_lingbot_vla_v2_pre_post_processors(
 
     1. ``dataset_stats`` (raw-feature stats from LeRobot's standard mechanism)
        — the recommended path for fine-tuning.
-    2. ``config.norm_stats`` (per-slot stats embedded in the checkpoint),
-       rewritten into raw-feature space via the slot-mapping offsets.
+    2. The checkpoint's saved normalizer state (per-slot stats embedded in
+       ``policy_preprocessor.json``), rewritten into raw-feature space via the
+       slot-mapping offsets.
     3. Neither → identity passthrough: the steps are present but normalization
        is a no-op.
     """
@@ -867,7 +868,7 @@ def make_lingbot_vla_v2_pre_post_processors(
     stats = (
         dataset_stats
         if dataset_stats is not None
-        else _raw_stats_from_slot_stats(config.robot_config, config.norm_stats)
+        else None  # No embedded stats — the normalizer will be inert (identity).
     )
     features = {**config.input_features, **config.output_features}
 

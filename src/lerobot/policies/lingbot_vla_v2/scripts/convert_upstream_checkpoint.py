@@ -402,9 +402,9 @@ def main():
         raw_camera_keys = [f"observation.images.{cam}" for cam in camera_keys]
 
     # Read the per-slot norm stats (from --norm-stats-path or the robot config's
-    # norm_stats reference) and embed them into the config so the processor's
-    # NormalizerProcessorStep carries them in its state.
-    norm_stats = None
+    # norm_stats reference) and convert them to raw-feature stats for the processor's
+    # NormalizerProcessorStep.
+    raw_stats = None
     norm_stats_source = args.norm_stats_path
     if norm_stats_source is None and _robot_config is not None:
         norm_stats_source = _robot_config.get("norm_stats")
@@ -412,14 +412,21 @@ def main():
         import json as _json
 
         with open(norm_stats_source) as f:
-            norm_stats = _json.load(f)
-        logger.info("Loaded norm stats from %s (%d slots)", norm_stats_source, len(norm_stats.get("norm_stats", {})))
+            slot_stats = _json.load(f)
+        logger.info("Loaded norm stats from %s (%d slots)", norm_stats_source, len(slot_stats.get("norm_stats", {})))
+        # Convert per-slot stats to raw-feature stats using the slot mappings.
+        from ..processor_lingbot_vla_v2 import _raw_stats_from_slot_stats
+
+        raw_stats = _raw_stats_from_slot_stats(
+            {"states": _robot_config.get("states", []), "actions": _robot_config.get("actions", [])},
+            slot_stats,
+        )
+        logger.info("Converted to raw-feature stats (%d features)", len(raw_stats) if raw_stats else 0)
 
     config = LingbotVLAV2Config(
         tokenizer_path=args.tokenizer_path or LingbotVLAV2Config().tokenizer_path,
         state_slots=state_slots or None,
         action_slots=action_slots or None,
-        norm_stats=norm_stats,
         # Robot features (raw dims), not the canonical 55-D space.
         input_features={
             OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(robot_state_dim,)),
@@ -470,11 +477,14 @@ def main():
     )
 
     # Building the processors resolves + embeds the robot config / norm stats into the
-    # config, so the saved checkpoint no longer references machine-specific paths.
-    # When no slot mappings are provided (format-only conversion), the processor uses
-    # identity passthrough (raw features assumed canonical) so users can evaluate
+    # processor's state, so the saved checkpoint no longer references machine-specific
+    # paths. When no slot mappings are provided (format-only conversion), the processor
+    # uses identity passthrough (raw features assumed canonical) so users can evaluate
     # without training first; fine-tuning overrides with the user's own slot mappings.
-    preprocessor, postprocessor = make_lingbot_vla_v2_pre_post_processors(config)
+    preprocessor, postprocessor = make_lingbot_vla_v2_pre_post_processors(
+        config,
+        dataset_stats=raw_stats,
+    )
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)

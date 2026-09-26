@@ -160,9 +160,9 @@ class LingbotVLAV2Config(PreTrainedConfig):
     relative_exclude_joints: list[str] = field(default_factory=list)
     # Camera renames are handled by the standard ``--rename_map`` CLI flag, not a
     # config field — the slot-mapping step reads the renamed features directly.
-    # Embedded norm_stats (filled at save time, or derived from dataset_stats at
-    # training time). Self-contained so a saved checkpoint works on any machine.
-    norm_stats: dict | None = None
+    # Normalization stats live in the processor's state (NormalizerProcessorStep),
+    # not in the config — training derives them from dataset_stats, inference reads
+    # them from the checkpoint's policy_preprocessor.json.
     # Derived from state_slots/action_slots by
     # resolve_robot_config_and_stats(); consumed by the processor's slot-mapping step.
     # Not serialized directly — the slot-mapping fields above are the canonical source.
@@ -680,9 +680,4 @@ class LingbotVLAV2Config(PreTrainedConfig):
         return recipe
 
     def _save_pretrained(self, save_directory: Path) -> None:
-        # Saved checkpoints must be self-contained: strip the norm_stats file-path
-        # reference from the embedded robot_config since the stats themselves are
-        # already embedded in config.norm_stats.
-        if self.norm_stats is not None and isinstance(self.robot_config, dict):
-            self.robot_config = {k: v for k, v in self.robot_config.items() if k != "norm_stats"}
         super()._save_pretrained(save_directory)

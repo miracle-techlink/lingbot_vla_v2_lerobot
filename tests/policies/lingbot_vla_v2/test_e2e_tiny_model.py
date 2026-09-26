@@ -110,15 +110,6 @@ def _make_tiny_config() -> LingbotVLAV2Config:
                 subtract_state=False,
             ),
         },
-        # Fake norm_stats for testing (mean=0, std=1)
-        norm_stats={
-            "norm_stats": {
-                "observation.state.arm.position": {"mean": [0.0] * 6, "std": [1.0] * 6},
-                "observation.state.effector.position": {"mean": [0.0], "std": [1.0]},
-                "action.arm.position": {"mean": [0.0] * 6, "std": [1.0] * 6},
-                "action.effector.position": {"mean": [0.0], "std": [1.0]},
-            }
-        },
         # Input/output features
         input_features={
             OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(7,)),
